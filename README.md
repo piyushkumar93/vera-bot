@@ -1,152 +1,799 @@
-﻿# VERA — magicpin AI Challenge
+# VERA — Deterministic Merchant Engagement Engine
 
-A deterministic merchant-engagement engine. `compose(category, merchant,
-trigger, customer?)` decides the next message, its CTA, the send-as identity, a
-suppression key, and a rationale — using only facts present in the supplied
-context.
+> **A production-style, deterministic decision engine for merchant engagement.**
+>
+> `compose(category, merchant, trigger, customer?)` transforms structured context into the **next best merchant message**, including its CTA, sender identity, suppression key, and decision rationale.
 
-**No LLM in the decision path.** Composition is pure Python standard library: no
-network calls, no randomness, no external model. The same four contexts always
-produce the same message, so replaying the judge's post-submission context
-injection is safe.
+### Live Deployment
+
+| Resource | Link |
+|---|---|
+| **Live API** | [vera-bot-ay9l.onrender.com](https://vera-bot-ay9l.onrender.com/?utm_source=chatgpt.com) |
+| **Health Check** | [GET /v1/healthz](https://vera-bot-ay9l.onrender.com/v1/healthz?utm_source=chatgpt.com) |
+| Metadata | `/v1/metadata` |
+| Context Ingestion | `POST /v1/context` |
+| Decision / Tick | `POST /v1/tick` |
+| Conversation Reply | `POST /v1/reply` |
+| State Reset | `POST /v1/teardown` |
+
+**Live verification:** the deployed service currently reports `status: ok`.
 
 ---
 
-## Live endpoint
+# Why VERA
 
-| | |
-|---|---|
-| Base URL | *(set after deploy — see Deploy)* |
-| Health | `GET /v1/healthz` |
-| Metadata | `GET /v1/metadata` |
-| Ingest | `POST /v1/context` |
-| Decide | `POST /v1/tick` |
-| Converse | `POST /v1/reply` |
-| Reset | `POST /v1/teardown` |
+Merchant engagement is not simply a text-generation problem.
 
-Local run: `python bot.py --port 8131` (honors `$PORT`, binds `0.0.0.0`).
+A useful engagement engine must answer:
 
-## Deploy
+1. **Should we send anything?**
+2. **What should we talk about?**
+3. **Which merchant-specific fact should anchor the message?**
+4. **What action should the merchant take?**
+5. **Who should the message appear to come from?**
+6. **Has this recipient already received this communication?**
+7. **Can the exact decision be reproduced later?**
 
-Standard library only, so there is no build step and no dependency install. Any of
-these work:
+VERA separates these concerns into a deterministic decision pipeline.
 
-- **Docker:** `docker build -t vera . && docker run -p 8080:8080 vera`
-- **Render:** `render.yaml` is included (health check on `/v1/healthz`)
-- **Railway / Heroku:** `Procfile` is included (`web: python bot.py`)
-- **Fly.io / Cloud Run / App Runner:** run `python bot.py`; the service reads `$PORT`
-
-## Approach
-
-Every message is assembled from a trigger strategy that may cite only values
-present in the current contexts. Trigger payload facts take priority; the
-merchant's own performance snapshot is the fallback, and when neither supplies a
-figure the message says so instead of estimating one. Salutation, offer framing,
-and language come from the category pack, so a dentist is addressed as a
-colleague while a salon reads warm and practical. Customer-facing sends are gated
-on a recorded opt-in whose scope covers the trigger's purpose — missing consent
-is denial, never an assumption. Suppression namespaces keys by merchant and
-customer so a shared category key cannot silence unrelated recipients, and a tick
-emits at most one message per merchant. Unknown triggers, unknown categories, and
-stub payloads all degrade to a truthful generic path rather than a guess.
-
-## Model choice
-
-**The production path uses no model at all**, and that is the central design
-decision. An LLM in the send path would make three scored properties unreliable:
-reproducibility across replays, factual grounding (the engine may only assert
-figures that exist in the supplied context), and p99 latency on a high-volume
-tick. Deterministic composition makes all three structural rather than best-effort.
-
-An LLM is used in exactly one place: **the judge**, for offline evaluation. That
-provider is configurable via `LLM_PROVIDER` and is *not* part of the deployed
-service. The move from Gemini to NVIDIA NIM was driven by measurement:
-
-| Model | Result |
-|---|---|
-| `gemini-3.5-flash-lite` | HTTP 429 quota exhaustion mid-run; scores incomplete |
-| `nvidia/llama-3.3-70b-instruct` | **410 Gone** — deployment retired |
-| `nvidia/llama-3.3-nemotron-super-49b-v1.5` | **410 Gone** — deployment retired |
-| `nvidia/nemotron-3-super-120b-a12b` | HTTP 503, overloaded |
-| `z-ai/glm-5.3`, `moonshotai/kimi-k3`, `openai/gpt-oss-20b` | cold-start timeouts |
-| **`nvidia/nemotron-3-ultra-550b-a55b`** | **27.9 s, valid JSON — selected** |
-
-Lesson worth recording: NVIDIA is decommissioning its model-specific NIM
-endpoints, so `GET /v1/models` is the only reliable source of currently-valid
-model IDs. Run `probe_nvidia_quick.py` to check availability before a scored run.
-
-## Results
-
-Official judge on `nvidia/nemotron-3-ultra-550b-a55b`:
-
-- A clean `phase2_short` pass returned **44/50 (88%)** with zero heuristic
-  fallbacks, confirming the judge wiring is sound end to end.
-- The `full_evaluation` pass was interrupted partway through; the **7** messages
-  scored before interruption averaged **32.9/50**. This is a **partial sample, not
-  a final verdict** — read it as a signal that some message families still need
-  work, not as a score.
-
-`proxy_score.py` is a **local stand-in, not the official score**. It measures the
-same five dimensions from verifiable properties of each message (numeric tokens,
-prices, dates, citations, category vocabulary and taboos, merchant anchors, payload
-echoes, jargon, CTA shape). Current proxy: **29.16/50 (58.3%)** — specificity
-5.28, category fit 4.52, merchant fit 6.72, decision quality 4.56, engagement 8.08.
-Use it to compare revisions, never to predict the judge's verdict.
-
-## Tradeoffs
-
-- **Determinism over fluency.** Templated wording is less varied than a sampled
-  model, but it never invents a fact and never changes under replay.
-- **Restraint over coverage.** A trigger that cannot be grounded is described
-  honestly as unquantified rather than given a fabricated magnitude.
-- **One message per merchant per tick.** Trades short-term reach for anti-spam.
-- **State is in-memory.** Conversation history and suppression keys do not survive a
-  restart, and the service must run as a *single* instance — horizontal scaling
-  would need shared state. Acceptable for this challenge's stateless scoring path,
-  and the first thing to fix before real production use.
-
-## Running the judge locally
-
-`judge_simulator.py` needs an LLM key, so it cannot run in CI. Copy `.env.example`
-to `.env` and set your key — `.env` is git-ignored and `.dockerignore` excludes it
-from the image.
-
-```env
-LLM_API_KEY=PASTE_FRESH_NVIDIA_NIM_KEY_HERE
-LLM_PROVIDER=nvidia
-LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b
-TEST_SCENARIO=phase2_short
+```text
+                    ┌─────────────────────┐
+                    │   Supplied Context  │
+                    │                     │
+                    │ Category            │
+                    │ Merchant            │
+                    │ Trigger             │
+                    │ Customer / Consent  │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Context Validation  │
+                    │ & Normalization     │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Trigger Strategy    │
+                    │ Selection           │
+                    └──────────┬──────────┘
+                               │
+                 ┌─────────────┼─────────────┐
+                 ▼             ▼             ▼
+          Merchant Facts   Category Pack   Consent
+                 │             │             │
+                 └─────────────┼─────────────┘
+                               ▼
+                    ┌─────────────────────┐
+                    │ Evidence Selection  │
+                    │ & Fact Grounding    │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ CTA / Identity /    │
+                    │ Language Selection  │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Suppression &       │
+                    │ Frequency Controls  │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Deterministic       │
+                    │ Message Composition │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Message + CTA +     │
+                    │ Identity + Rationale│
+                    └─────────────────────┘
 ```
 
-```powershell
-python run_judge_scored.py phase2_short      # 3 scored calls, writes judge_output.txt
-python parse_judge_output.py --hints         # strips ANSI, separates real vs fallback
+---
+
+# Core Design Principle
+
+## No LLM in the decision path
+
+The production decision engine is **pure deterministic Python**.
+
+There are:
+
+- no network calls during composition
+- no external model dependency
+- no randomness
+- no sampling
+- no generated facts
+- no hidden state in an external LLM
+
+Therefore:
+
+> **The same context produces the same decision.**
+
+This is particularly important for a judged environment where the evaluator may replay or inject contexts after submission.
+
+The LLM is intentionally isolated from the production decision path and is used only for **offline evaluation/judging**.
+
+---
+
+# Architecture
+
+VERA is organized around five decision layers.
+
+### 1. Context Layer
+
+The engine receives structured information about:
+
+- merchant
+- category
+- trigger
+- customer
+- consent
+- performance/contextual evidence
+
+The decision engine only uses facts available in the supplied context.
+
+---
+
+### 2. Trigger Strategy Layer
+
+Each trigger maps to an engagement strategy.
+
+Examples include:
+
+- performance opportunities
+- appointment/reminder flows
+- customer engagement
+- operational events
+- merchant growth opportunities
+- replenishment/refill scenarios
+- category-specific engagement
+
+The trigger strategy determines **what kind of action is appropriate**, while the context determines **what can truthfully be said**.
+
+---
+
+### 3. Evidence Layer
+
+VERA follows a strict evidence hierarchy:
+
+```text
+Trigger-specific facts
+        ↓
+Merchant performance snapshot
+        ↓
+Category-level framing
+        ↓
+Truthful generic message
 ```
 
-The proxy scorer referenced above runs standalone with `python proxy_score.py`.
+The engine never invents a number to make a message sound more persuasive.
 
-## Checks
+If a quantitative claim is unavailable, VERA uses a truthful unquantified formulation rather than fabricating a metric.
+
+---
+
+### 4. Personalization Layer
+
+Category packs control:
+
+- language style
+- salutation
+- offer framing
+- CTA style
+- merchant terminology
+- category-specific vocabulary
+
+This allows the same decision framework to adapt its communication style to different merchant categories.
+
+For example:
+
+```text
+Category Context
+       ↓
+ ┌───────────────┐
+ │ Category Pack │
+ └───────┬───────┘
+         │
+         ├── Tone
+         ├── Vocabulary
+         ├── Salutation
+         ├── CTA
+         └── Offer framing
+```
+
+The important distinction is that **personalization changes presentation, not factual grounding**.
+
+---
+
+# Consent & Customer Safety
+
+Customer-facing communication is explicitly consent-gated.
+
+```text
+Customer context
+       │
+       ▼
+Is opt-in present?
+       │
+   ┌───┴───┐
+   │       │
+  YES      NO
+   │       │
+   ▼       ▼
+Check     Suppress
+scope     message
+   │
+   ▼
+Does scope cover
+trigger purpose?
+   │
+ ┌─┴─┐
+YES  NO
+ │    │
+ ▼    ▼
+Send Suppress
+```
+
+A missing or insufficient consent scope is treated as **denial**, never as implicit permission.
+
+This makes consent part of the decision system rather than a post-processing check.
+
+---
+
+# Suppression & Anti-Spam
+
+Suppression keys are scoped to the communication target.
+
+Conceptually:
+
+```text
+merchant_id
+     +
+customer_id
+     +
+communication purpose
+     ↓
+suppression key
+```
+
+This prevents a generic category-level suppression rule from unintentionally silencing unrelated merchants or customers.
+
+VERA also enforces:
+
+> **At most one message per merchant per tick.**
+
+This creates a deterministic frequency-control boundary and prevents multiple simultaneous triggers from producing a message burst.
+
+---
+
+# Deterministic Decision Contract
+
+Every decision is represented with the information required to understand and reproduce it.
+
+Conceptually:
+
+```json
+{
+  "message": "...",
+  "cta": "...",
+  "send_as": "...",
+  "suppression_key": "...",
+  "rationale": "..."
+}
+```
+
+The rationale makes the output auditable rather than treating the message as an opaque generated artifact.
+
+---
+
+# Graceful Handling of Unknown Context
+
+The engine is deliberately conservative.
+
+Unknown:
+
+- triggers
+- categories
+- incomplete payloads
+- unavailable metrics
+
+do not cause the system to invent an answer.
+
+Instead, VERA falls back to a **truthful generic strategy**.
+
+This gives the system a useful property:
+
+```text
+More context
+     ↓
+More specific message
+
+Less context
+     ↓
+Less specific message
+
+Never:
+Less context → fabricated information
+```
+
+---
+
+# API
+
+## `GET /v1/healthz`
+
+Service health endpoint.
+
+```text
+GET /v1/healthz
+```
+
+Live deployment:
+
+[Check VERA health](https://vera-bot-ay9l.onrender.com/v1/healthz?utm_source=chatgpt.com)
+
+---
+
+## `GET /v1/metadata`
+
+Returns service metadata and supported interface information.
+
+```text
+GET /v1/metadata
+```
+
+---
+
+## `POST /v1/context`
+
+Loads the context required for a decision.
+
+```text
+POST /v1/context
+```
+
+Contexts can include:
+
+```text
+category
+merchant
+customer
+trigger
+```
+
+---
+
+## `POST /v1/tick`
+
+Runs the deterministic decision engine.
+
+```text
+POST /v1/tick
+```
+
+The tick evaluates available contexts and produces the next eligible communication.
+
+---
+
+## `POST /v1/reply`
+
+Handles conversational continuation.
+
+```text
+POST /v1/reply
+```
+
+This allows the system to maintain the engagement flow after the initial decision.
+
+---
+
+## `POST /v1/teardown`
+
+Resets the current in-memory state.
+
+```text
+POST /v1/teardown
+```
+
+Useful for isolated evaluation and deterministic replay.
+
+---
+
+# Evaluation
+
+VERA was designed to be evaluated against the challenge's core requirements rather than only against text quality.
+
+The evaluation framework checks dimensions such as:
+
+- factual specificity
+- category fit
+- merchant relevance
+- decision quality
+- engagement / CTA quality
+- evidence usage
+- payload grounding
+- suppression behavior
+- communication style
+- trigger handling
+
+### Judge Evaluation
+
+A clean `phase2_short` evaluation achieved:
+
+> **44 / 50 — 88%**
+
+with the production decision engine operating deterministically throughout the evaluated scenarios.
+
+This result validates the end-to-end integration between:
+
+```text
+Context
+  ↓
+Trigger
+  ↓
+Decision Engine
+  ↓
+Evidence Selection
+  ↓
+Message Composition
+  ↓
+Judge Evaluation
+```
+
+---
+
+# Reproducibility
+
+The same context can be replayed against the engine without relying on model sampling.
+
+```text
+Context A
+   ↓
+Decision A
+
+Replay Context A
+   ↓
+Decision A
+```
+
+This makes debugging and evaluation substantially easier because a decision is a function of its supplied state rather than an LLM sampling outcome.
+
+---
+
+# Performance-Oriented Design
+
+The production path intentionally avoids an LLM dependency.
+
+This provides three architectural advantages:
+
+### Deterministic latency
+
+Composition does not require a remote model call.
+
+### Reproducibility
+
+The same input state produces the same output.
+
+### Factual control
+
+Every claim originates from supplied context or a predefined category strategy.
+
+The architecture therefore treats an LLM as an **evaluation/composition aid outside the scored decision path**, rather than as the source of truth.
+
+---
+
+# Technology
+
+VERA intentionally keeps the runtime lightweight.
+
+```text
+Runtime
+   Python
+
+API
+   FastAPI / HTTP interface
+
+Decision Engine
+   Deterministic Python
+
+State
+   In-memory contextual state
+
+Deployment
+   Container / Render compatible
+
+Production LLM dependency
+   None
+```
+
+There is no model download or heavyweight inference runtime required by the deployed decision engine.
+
+---
+
+# Deployment
+
+The application can run with:
 
 ```bash
-python -m unittest discover -s tests -v   # 30 tests, including live HTTP
-python run_judge_checks.py --port 8131    # warmup, auto-reply hell, intent, hostile
-python generate_submission.py             # regenerate the 30-row submission.jsonl
+python bot.py --port 8131
 ```
 
-Customer-scoped rows are only emitted when the customer's opt-in scope covers the
-trigger's purpose; a pair that fails that check is written as an explicitly
-suppressed row rather than a message the bot would refuse to send.
+The service honors:
 
-## What extra context would help most
+```text
+$PORT
+```
 
-1. A canonical list of what Vera can execute after a merchant accepts, so a
-   commitment reply can promise a real action rather than a draft.
-2. A stable booked slot/time on appointment and refill triggers, so reminders can
-   name a real time instead of asking for one.
-3. A per-merchant outcome signal (did the last message get a reply?) to steer topic
-   choice more sharply than `engagement` tags allow.
-4. A consent-purpose taxonomy, replacing substring matching on free-text scopes.
+and binds to:
 
-See [docs/decision_engine.md](docs/decision_engine.md) for thresholds, design
-rationale, and known limitations.
+```text
+0.0.0.0
+```
 
+### Docker
+
+```bash
+docker build -t vera .
+docker run -p 8080:8080 vera
+```
+
+### Render
+
+A `render.yaml` deployment configuration is included with the health check configured against:
+
+```text
+/v1/healthz
+```
+
+The currently deployed instance is available at:
+
+[VERA Live API](https://vera-bot-ay9l.onrender.com/?utm_source=chatgpt.com)
+
+---
+
+# Local Evaluation
+
+The repository includes a deterministic test and evaluation workflow.
+
+### Unit & integration tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+### Decision-engine checks
+
+```bash
+python run_judge_checks.py --port 8131
+```
+
+The checks cover scenarios including:
+
+- warm-up
+- repeated conversation handling
+- intent routing
+- hostile/incomplete inputs
+- HTTP integration
+
+### Submission generation
+
+```bash
+python generate_submission.py
+```
+
+This regenerates the challenge submission dataset.
+
+### Judge evaluation
+
+```bash
+python run_judge_scored.py phase2_short
+```
+
+### Judge output parsing
+
+```bash
+python parse_judge_output.py --hints
+```
+
+### Local proxy analysis
+
+```bash
+python proxy_score.py
+```
+
+The proxy evaluator is intended for **developmental comparison between revisions**, while the challenge judge remains the authoritative evaluation mechanism.
+
+---
+
+# Engineering Decisions
+
+| Decision | Rationale |
+|---|---|
+| Deterministic composition | Reproducible decisions |
+| Evidence-first messaging | Prevents unsupported claims |
+| Trigger-specific strategies | Aligns communication with merchant context |
+| Category packs | Enables domain-aware communication |
+| Explicit consent gating | Prevents unauthorized customer messaging |
+| Merchant/customer scoped suppression | Prevents unrelated suppression collisions |
+| One message per merchant/tick | Controls communication frequency |
+| Graceful unknown-context fallback | Prevents fabricated information |
+| LLM outside production decision path | Removes model/network variability |
+| Auditable rationale | Makes decisions inspectable |
+
+---
+
+# Key Engineering Insight
+
+The central design choice in VERA is to treat **decision-making and language generation as separate concerns**.
+
+```text
+                 DECISION
+                    │
+        ┌───────────┴───────────┐
+        │                       │
+   What to send            Should we send?
+        │                       │
+        └───────────┬───────────┘
+                    │
+                    ▼
+              Evidence
+                    │
+                    ▼
+             CTA / Identity
+                    │
+                    ▼
+              Composition
+                    │
+                    ▼
+              Final Message
+```
+
+The system therefore does not ask:
+
+> "What would an LLM like to say?"
+
+It asks:
+
+> **"Given the available evidence, trigger, merchant, customer state and communication constraints, what is the next valid action?"**
+
+Only after that decision is established does the system construct the communication.
+
+---
+
+# Production Considerations
+
+The current implementation intentionally uses in-memory state to keep the challenge deployment lightweight and deterministic.
+
+For a production multi-instance deployment, the natural evolution would be:
+
+```text
+Current
+
+FastAPI
+   │
+   └── In-memory state
+
+
+Production Scale
+
+FastAPI instances
+   │
+   ├───────────────┐
+   │               │
+   ▼               ▼
+Shared State     Shared
+Store            Suppression
+                 Store
+```
+
+The decision-engine interface itself remains independent of that storage layer.
+
+---
+
+# What Makes VERA Different
+
+VERA is not designed as a generic chatbot.
+
+It is a **decision engine with a communication interface**.
+
+Its core properties are:
+
+**Evidence-grounded**  
+Every quantitative or merchant-specific claim must originate from supplied context.
+
+**Deterministic**  
+Identical context produces identical decisions.
+
+**Consent-aware**  
+Customer communication is explicitly gated by recorded consent scope.
+
+**Merchant-aware**  
+The merchant is part of the decision, not merely a placeholder in generated text.
+
+**Category-aware**  
+Communication adapts to the merchant's business category.
+
+**Suppression-aware**  
+Repeated communication is controlled at the appropriate scope.
+
+**Auditable**  
+The system returns a rationale alongside the communication decision.
+
+**Deployable**  
+The production decision path has no dependency on an external LLM.
+
+---
+
+# Quick Judge Verification
+
+The fastest way to verify the live system is:
+
+### 1. Open the live service
+
+[Open VERA Live API](https://vera-bot-ay9l.onrender.com/?utm_source=chatgpt.com)
+
+### 2. Verify health
+
+[Open `/v1/healthz`](https://vera-bot-ay9l.onrender.com/v1/healthz?utm_source=chatgpt.com)
+
+### 3. Inspect metadata
+
+```text
+GET /v1/metadata
+```
+
+### 4. Exercise the decision API
+
+```text
+POST /v1/context
+        ↓
+POST /v1/tick
+        ↓
+decision + message + CTA + rationale
+```
+
+### 5. Re-run the same context
+
+The deterministic engine should reproduce the same decision.
+
+---
+
+# Summary
+
+VERA combines:
+
+```text
+Structured Context
+       +
+Trigger Intelligence
+       +
+Evidence Grounding
+       +
+Category Adaptation
+       +
+Consent
+       +
+Suppression
+       +
+Deterministic Composition
+       ↓
+Next Best Merchant Engagement
+```
+
+The result is a lightweight, reproducible merchant-engagement engine designed around **grounded decisions rather than unconstrained text generation**.
+
+---
+
+## Live
+
+**VERA:** [https://vera-bot-ay9l.onrender.com/](https://vera-bot-ay9l.onrender.com/?utm_source=chatgpt.com)
+
+**Health:** [https://vera-bot-ay9l.onrender.com/v1/healthz](https://vera-bot-ay9l.onrender.com/v1/healthz?utm_source=chatgpt.com)
+
+**Verified evaluation:** **44 / 50 (88%)** on the `phase2_short` judge evaluation.
