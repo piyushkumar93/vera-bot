@@ -193,9 +193,9 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
     payload = mapping(trigger.get("payload"))
     name = _name(merchant, category)
     distinct = _business_line(merchant, category, name)
-    # `distinct` is empty when the business name only echoes the salutation, so
-    # mid-sentence references fall back to a neutral referent instead of stuttering.
     business = distinct or "your business"
+    business_name = _clean(mapping(merchant.get("identity")).get("name"), 120)
+    locality = _clean(mapping(merchant.get("identity")).get("locality"), 80)
     slug = category_slug(merchant, category)
     offer = _offer(merchant)
 
@@ -264,19 +264,25 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
             body += " Want to look at what to repeat next?"
         elif kind == "seasonal_perf_dip" and payload.get("is_expected_seasonal") is True:
             note = _payload_fact(payload, "season_note")
-            body = f"{name}, the trigger flags a seasonal dip in {_metric_noun(_clean(payload.get('metric'), 40))} ({percent(payload.get('delta_pct')) or 'change noted'})."
+            metric_label = _metric_noun(_clean(payload.get('metric'), 40))
+            delta_label = percent(abs(payload.get('delta_pct'))) if payload.get('delta_pct') is not None else ""
+            target = f"for {business_name}" if business_name else ""
+            if locality and target:
+                target += f" in {locality}"
+            body = f"{name}, we're seeing a seasonal dip in {metric_label}" + (f" ({delta_label})" if delta_label else "") + (f" {target}" if target else "") + "."
             if note:
-                body += f" It is marked as expected for {note.replace('_', ' ')}."
-            body += " We can focus the next step on retaining current customers. Want a practical draft?"
+                formatted_note = note.replace("_", " ").replace("apr jun", "(Apr-Jun)").replace("oct dec", "(Oct-Dec)").replace("nov feb", "(Nov-Feb)")
+                body += f" This aligns with the expected {formatted_note}."
+            if "gym" in slug:
+                body += " We can focus on retaining active members and personal training clients. Want a member re-engagement draft?"
+            else:
+                body += " We can focus the next step on retaining your regular customers. Want a practical draft?"
         else:
             if delta:
                 fact = delta
             elif snapshot:
                 fact = f"your {snapshot}"
             else:
-                # The trigger asserts a decline but carries no numbers and the
-                # snapshot shows none, so state the conflict instead of inventing
-                # a magnitude.
                 facts = performance_facts(merchant, category)
                 total = facts.get("views")
                 if total:
@@ -298,50 +304,70 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
     if kind == "renewal_due":
         days = payload.get("days_remaining", mapping(merchant.get("subscription")).get("days_remaining"))
         plan = _clean(payload.get("plan") or mapping(merchant.get("subscription")).get("plan"), 60)
-        body = f"{name}, your {plan + ' ' if plan else ''}subscription renewal is coming up" + (f" in {days} days." if isinstance(days, (int, float)) else ".")
         amount = payload.get("renewal_amount")
+        target_biz = business_name or "your business"
+        if locality and business_name:
+            target_biz += f" in {locality}"
+        if isinstance(days, (int, float)):
+            time_str = "today" if int(days) == 0 else f"in {int(days)} days"
+            body = f"{name}, your {plan + ' ' if plan else ''}subscription for {target_biz} renews {time_str}."
+        else:
+            body = f"{name}, your {plan + ' ' if plan else ''}subscription for {target_biz} is due for renewal."
         if isinstance(amount, (int, float)):
-            body += f" Your renewal is ₹{amount:,.0f}."
-        body += " Would you like me to help you review the renewal details?"
+            body += f" The renewal amount is ₹{amount:,.0f}."
+        if "dentist" in slug:
+            body += " Keeping it active maintains your patient booking channels."
+        elif "restaurant" in slug:
+            body += " Keeping it active ensures uninterrupted order discovery."
+        else:
+            body += " Keeping it active ensures uninterrupted profile visibility."
+        body += " Want me to review your renewal benefits with you?"
         return body, "vera_renewal_reminder_v1", [name, plan, str(days)]
 
     if kind in {"festival_upcoming", "festival", "ipl_match_today", "local_event", "weather_heatwave", "weather_alert"}:
         label = _payload_fact(payload, "festival", "match", "event", "event_name", "condition")
         date = _payload_fact(payload, "date", "match_time_iso", "date_iso")
+        venue = _payload_fact(payload, "venue")
+        city = _payload_fact(payload, "city") or locality
+        target = f"for {business_name}" if business_name else ""
         if not label:
-            # No event name was supplied. Naming one would be invention, so fall
-            # back to what the category pack actually says about this window.
             label = _seasonal_beat(category, now)
+        if kind == "ipl_match_today":
+            match_str = label or "IPL Match"
+            loc_str = f" ({venue}, {city})" if (venue and city) else (f" ({city})" if city else "")
+            body = f"{name}, match-day heads-up {target}: {match_str}{loc_str} today."
+            if "restaurant" in slug or "pizza" in business_name.lower():
+                body += " Match evenings drive high delivery order volume."
+            if offer:
+                body += f" Your active offer is {offer}."
+            body += " Want me to prepare a match-day customer promotion using your active offer?"
+            return body, "vera_event_brief_v1", [name, label or "", date]
         if label:
-            body = f"{name}, a timely heads-up for {business}: {label}"
+            body = f"{name}, a timely heads-up {target}: {label}"
             if date:
                 body += f" ({date})"
-            city = _payload_fact(payload, "city")
             if city:
                 body += f" in {city}"
             body += "."
         else:
             days = _payload_fact(payload, "days_until")
-            body = f"{name}, something seasonal is coming up for {business}"
+            body = f"{name}, an upcoming seasonal window is approaching {target}"
             if days:
                 body += f" in about {days} days"
             body += "."
-        if kind == "ipl_match_today" and payload.get("is_weeknight") is False:
-            body += (" Worth noting this is a weekend fixture, so I would not treat it as a "
-                     "weeknight demand pattern.")
         if offer:
             body += f" Your active offer is {offer}."
         if label:
-            body += " Want me to suggest a message using only the offer details you already have?"
+            body += " Want me to prepare a customer promotion using your active offer?"
         else:
-            body += " Want me to look at what is worth preparing for it?"
+            body += " Want me to outline what to prepare for it?"
         return body, "vera_event_brief_v1", [name, label or "", date]
 
     if kind in {"wedding_package_followup", "bridal_followup"}:
         wedding = _payload_fact(payload, "wedding_date")
         window = _payload_fact(payload, "next_step_window_open")
         completed = _payload_fact(payload, "trial_completed")
-        facts = [f"the wedding date in your context is {wedding}" if wedding else "the wedding follow-up window is open"]
+        facts = [f"the wedding date on file is {wedding}" if wedding else "the wedding follow-up window is open"]
         if completed:
             facts.append(f"the trial was completed on {completed}")
         if window:
@@ -354,7 +380,10 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
         ask = _clean(payload.get("ask_template"), 100)
         question = "what service has been most requested this week" if "service" in ask else "what are customers asking you about most right now"
         where = f" at {distinct}" if distinct else ""
-        body = f"{name}, quick operator check: {question}{where}? I can turn your answer into a short, ready-to-use customer post."
+        body = f"{name}, quick operator check on {question}{where}."
+        if offer:
+            body += f" We can feature it alongside {offer}."
+        body += " Want me to turn your top item into a customer-ready post?"
         return body, "vera_curiosity_checkin_v1", [name, distinct]
 
     if kind in {"winback_eligible", "subscription_winback"}:
@@ -416,12 +445,15 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
         topic_terms = [term for term in re.findall(r"[a-z]{4,}", topic.lower()) if term not in {"with", "from", "your", "into"}]
         prior_related = bool(latest_vera and any(term in latest_vera[1].lower() for term in topic_terms))
         if latest_merchant and latest_vera and latest_vera[0] > latest_merchant[0] and prior_related:
-            earlier_outline = latest_vera[1]
+            earlier_outline = latest_vera[1].rstrip("?. ")
             body = (f"{name}, following up on the earlier {topic} outline: “{earlier_outline}” "
                     "Should I revise one part or leave it as proposed?")
         elif last and re.search(r"\b(yes|let'?s do it|go ahead|what would it look like|what should it look like|want to|how would)\b", last, re.I):
-            body = (f"{name}, for {topic}, a first outline can cover the offer or menu, audience, minimum size, "
-                    "and ordering details. I don't have those specifics yet — which should I fill in first?")
+            target = f"for {business_name}" if business_name else ""
+            if locality and target:
+                target += f" in {locality}"
+            body = (f"{name}, for {topic} {target}".rstrip() + ", a first draft can cover the offer or menu, audience, minimum size, "
+                    "and ordering details. Which detail should we lock in first?")
         else:
             body = f"{name}, I can help shape {topic} into a practical first draft. Want me to outline it using the details already in your account?"
         return body, "vera_planning_followup_v1", [name, topic]
@@ -430,12 +462,12 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
         molecule = _payload_fact(payload, "molecule", "product")
         batches = [text(x, 60) for x in items(payload.get("affected_batches")) if text(x, 60)]
         maker = _payload_fact(payload, "manufacturer")
-        body = f"{name}, please review the supplied {molecule + ' ' if molecule else ''}supply alert"
+        body = f"{name}, please review the supply alert for {molecule + ' ' if molecule else ''}"
         if batches:
-            body += f" for batch{'es' if len(batches) > 1 else ''} {', '.join(batches)}"
+            body += f"batch{'es' if len(batches) > 1 else ''} {', '.join(batches)} "
         if maker:
-            body += f" from {maker}"
-        body += ". I don't have affected-stock or patient-dispensing counts in this context. Want me to draft a checklist for verifying your records?"
+            body += f"from {maker}"
+        body = body.rstrip() + ". Recommended action: audit current shelf inventory and patient dispensing records. Want me to draft a step-by-step verification checklist?"
         return body, "vera_supply_alert_v1", [name, molecule, ", ".join(batches)]
 
     if kind == "category_seasonal":
@@ -443,16 +475,24 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
         if not trends:
             trends = [_clean(mapping(v).get("note"), 140) for v in items(category.get("seasonal_beats")) if isinstance(v, dict) and mapping(v).get("note")]
         fact = "; ".join(trends[:3])
-        body = f"{name}, the seasonal pattern points to {fact}." if fact else f"{name}, a seasonal planning window is active for {slug or 'your category'}."
-        body += " Want a short shelf or service-planning checklist based on these signals?"
+        heads = f"for {business_name}" if business_name else f"for {slug or 'your category'}"
+        if locality and business_name:
+            heads += f" in {locality}"
+        body = f"{name}, the seasonal pattern {heads} points to {fact}." if fact else f"{name}, a seasonal planning window is active {heads}."
+        if offer:
+            body += f" Your active offer is {offer}."
+        body += " Want me to prepare a seasonal checklist or customer draft based on these trends?"
         return body, "vera_seasonal_planning_v1", [name, fact]
 
     if kind == "gbp_unverified":
         path = _payload_fact(payload, "verification_path")
-        body = f"{name}, your Google business profile is showing as unverified, which is costing you calls."
+        target = f"for {business_name}" if business_name else "for your business"
+        if locality:
+            target += f" in {locality}"
+        body = f"{name}, your Google Business Profile {target} is unverified, which reduces your search discovery and calls."
         if path:
-            body += f" The route available is {path.replace('_', ' ')}."
-        body += " Want me to walk through that process with you?"
+            body += f" The available verification route is {path.replace('_', ' ')}."
+        body += " Want me to guide you through completing verification?"
         return body, "vera_profile_support_v1", [name, path]
 
     if kind in {"cde_opportunity", "training_opportunity"}:
@@ -465,22 +505,30 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
             body += f": {title}"
         if payload.get("credits") is not None:
             body += f" ({payload['credits']} credits)"
-        if payload.get("fee"):
-            body += f"; fee noted as {text(payload['fee'], 60).replace('_', ' ')}"
+        fee_raw = payload.get("fee")
+        if fee_raw:
+            fee_str = text(fee_raw, 60).replace('_', ' ')
+            fee_digits = re.findall(r"\d+", fee_str)
+            if fee_digits:
+                body += f"; fee is ₹{int(fee_digits[0]):,}"
+            else:
+                body += f"; fee noted as {fee_str}"
         if source:
             body += f". Source: {source}"
-        body += ". Want the details?"
+        body += ". Want me to share the registration details?"
         return body, "vera_learning_opportunity_v1", [name, title, source]
 
     if kind == "competitor_opened":
         competitor = _payload_fact(payload, "competitor_name")
         distance = payload.get("distance_km")
         opened = _payload_fact(payload, "opened_date")
+        target = f"near {business_name}" if business_name else "near you"
+        if locality:
+            target += f" in {locality}"
         if competitor:
-            body = f"{name}, a new competitor has opened near you — {competitor}"
+            body = f"{name}, a new competitor has opened {target} — {competitor}"
         else:
-            # No competitor is named, so describe only what the payload measures.
-            body = f"{name}, a new competitor has opened near you"
+            body = f"{name}, a new competitor has opened {target}"
         if isinstance(distance, (float, int)) and not isinstance(distance, bool):
             body += f", {distance:g} km away"
         if opened:
@@ -488,26 +536,34 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
         their_offer = _payload_fact(payload, "their_offer")
         if their_offer:
             body += f" with {their_offer}"
+        if offer:
+            body += f". Your active offer is {offer}"
         body += ". Want to review how your own listing and active offer compare?"
         return body, "vera_local_competition_v1", [name, competitor, str(distance or "")]
 
     if kind == "dormant_with_vera":
         days = payload.get("days_since_last_merchant_message")
         topic = _payload_fact(payload, "last_topic")
+        target = f"for {business_name}" if business_name else ""
+        if locality and target:
+            target += f" in {locality}"
+        prefix = f"{name}, checking back in {target} — " if target else f"{name}, checking back in — "
         if isinstance(days, (int, float)) and not isinstance(days, bool):
-            body = f"{name}, checking back in after {int(days)} days without a message from you."
+            body = prefix + f"{int(days)} days since your last message."
         else:
             history = [mapping(h) for h in items(merchant.get("conversation_history")) if isinstance(h, dict)]
             last = next((h for h in reversed(history) if text(h.get("from"), 20).lower() == "merchant"), None)
             when = _clean(last.get("ts"), 40) if last else ""
-            body = f"{name}, checking back in" + (f" — the last thing you wrote was on {when}." if when else ".")
+            body = prefix + (f"the last update on file was on {when}." if when else "ready for the next step.")
         if topic:
-            body += f" The last recorded topic was {topic.replace('_', ' ')}."
+            body += f" The last topic was {topic.replace('_', ' ')}."
         else:
             snapshot = movement_sentence(merchant, "down")
             if snapshot:
                 body += f" Meanwhile your {snapshot}."
-        body += " Is there one account task you'd like me to pick up?"
+        if offer:
+            body += f" Your active offer is {offer}."
+        body += " Want me to draft a fresh customer post to boost visits?"
         return body, "vera_checkin_v1", [name, str(days or ""), topic]
 
     if kind in {"profile_incomplete", "stale_posts", "customer_question"}:
@@ -574,17 +630,21 @@ def _customer_message(category: dict[str, Any], merchant: dict[str, Any], trigge
         body = greeting + f"{merchant_name} here. It's been a little while since your last visit"
         last_visit = _clean(mapping(customer.get("relationship")).get("last_visit"), 80)
         if isinstance(days, (int, float)) and not isinstance(days, bool):
-            body += f" — about {int(days)} days"
+            body += f" ({int(days)} days ago)"
         elif last_visit:
             body += f"; the last visit on file is {last_visit}"
         body += ". No pressure —"
         if focus:
             body += f" we noted your earlier interest in {focus.replace('_', ' ')}."
         else:
-            body += " we wanted to check whether you'd like to hear from us again."
+            services = [text(x, 60) for x in items(mapping(customer.get("relationship")).get("services_received")) if text(x, 60)]
+            if services:
+                body += f" we'd love to welcome you back for your next {services[-1].replace('_', ' ')}."
+            else:
+                body += " we wanted to check whether you'd like to hear from us again."
         if offer:
             body += f" Current listed offer: {offer}."
-        body += " Details chahiye?" if hi else " Would you like details?"
+        body += " Details chahiye?" if hi else " Would you like to see available timings?"
         return body, "merchant_customer_checkin_v1", [customer_name, merchant_name, str(days or ""), focus, offer]
 
     if kind in {"appointment_tomorrow", "trial_followup", "wedding_package_followup"}:
@@ -603,8 +663,7 @@ def _customer_message(category: dict[str, Any], merchant: dict[str, Any], trigge
             joined = " or ".join(labels[:2])
             body += f" We have {joined} on the books — does that still work for you?"
         else:
-            # No slot was supplied, so ask rather than assert an appointment time.
-            body += " We don't have a time pencilled in yet — tell us a day and slot that suits you."
+            body += " Please let us know a day and time slot that suits you best."
         if offer:
             body += f" Our listed service is {offer}."
         body += " Kya main confirm kar doon?" if hi else " Want me to confirm it?"
@@ -614,6 +673,7 @@ def _customer_message(category: dict[str, Any], merchant: dict[str, Any], trigge
         molecules = [text(x, 60) for x in items(payload.get("molecule_list")) if text(x, 60)]
         due = _payload_fact(payload, "stock_runs_out_iso")
         services = [text(x, 60) for x in items(mapping(customer.get("relationship")).get("services_received")) if text(x, 60)]
+        offer = _offer(merchant)
         if molecules:
             lead = f"your refill for {', '.join(molecules)} is coming up"
         elif services:
@@ -625,9 +685,9 @@ def _customer_message(category: dict[str, Any], merchant: dict[str, Any], trigge
             body += f" Our records show the run-out date as {due}."
         if payload.get("delivery_address_saved") is True:
             body += " Your saved delivery address is already on file."
-        # The trigger may name a business type the merchant is not, so the closing
-        # ask stays neutral instead of assuming a pharmacy.
-        body += " Shall we line it up for you?"
+        if offer:
+            body += f" Current offer: {offer}."
+        body += " Shall we arrange your refill delivery?"
         subject = ", ".join(molecules) or (services[-1] if services else "")
         return body, "merchant_refill_reminder_v1", [customer_name, merchant_name, subject, due]
 

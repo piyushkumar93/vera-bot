@@ -20,12 +20,17 @@ from engine.constants import SAFETY_PRIORITY
 from engine.context_store import ContextStore
 from engine.conversation import respond
 from engine.signals import consent_allows, mapping, text, trigger_expired
+from engine import llm_dispatch
+from engine.nim_polish import polish
 from engine.state import RuntimeState
 
 STARTED = time.monotonic()
 contexts = ContextStore()
 runtime = RuntimeState()
 MAX_ACTIONS_PER_TICK = 20
+# At most this many messages per tick get an NIM wording call. Keeps the
+# optional layer from serialising across a large trigger batch.
+MAX_POLISH_PER_TICK = 1
 TICK_LOCK = RLock()
 
 
@@ -144,6 +149,7 @@ def _handle_tick(body: dict[str, Any]) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     selected_merchants: set[str] = set()
     selected_customers: set[tuple[str, str]] = set()
+    polished_count = 0
     for _, trigger_id, trigger, merchant in candidates:
         if len(actions) >= MAX_ACTIONS_PER_TICK:
             break
@@ -168,6 +174,17 @@ def _handle_tick(body: dict[str, Any]) -> dict[str, Any]:
         conversation_id = f"conv_{merchant_id}_{customer_part}_{trigger_id}"[:240]
         if conversation_id in runtime.sent_conversations:
             continue
+        # Wording polish is optional and strictly cosmetic. It is applied after
+        # every deterministic gate (selection, consent, suppression, dedupe) so
+        # those decisions never depend on the model, and capped per tick so a
+        # burst of triggers cannot serialise into many network calls and blow
+        # the 30s endpoint budget.
+        body = message["body"]
+        if polished_count < MAX_POLISH_PER_TICK:
+            polished = polish(message, category, merchant, trigger, customer)
+            if polished["body"] != message["body"]:
+                body = polished["body"]
+                polished_count += 1
         action = {
             "conversation_id": conversation_id,
             "merchant_id": merchant_id,
@@ -176,7 +193,7 @@ def _handle_tick(body: dict[str, Any]) -> dict[str, Any]:
             "trigger_id": trigger_id,
             "template_name": message["template_name"],
             "template_params": message["template_params"],
-            "body": message["body"],
+            "body": body,
             "cta": message["cta"],
             "suppression_key": _suppression_key(trigger, trigger_id),
             "rationale": message["rationale"],
@@ -193,9 +210,21 @@ def health() -> dict[str, Any]:
 
 
 def metadata() -> dict[str, Any]:
-    return {"team_name": "VERA Deterministic Engine", "team_members": [], "model": "deterministic-rules-v1",
+    # Report the model only when the provider path has actually produced a
+    # message. Environment variables alone prove nothing: a configured-but-never-
+    # used provider must not be advertised as the active model.
+    llm = llm_dispatch.stats()
+    active = llm["successes"] > 0
+    return {"team_name": "VERA Deterministic Engine", "team_members": [],
+            "model": (f"vera-deterministic-engine-v1+llm:{llm['model']}" if active
+                      else "deterministic-rules-v1"),
             "approach": "Context-grounded deterministic composition with versioned state, consent gating, suppression, and reply routing",
-            "version": "1.0.0"}
+            "version": "1.0.0",
+            "llm": {"provider": llm_dispatch.active_name() or None,
+                    "configured": llm["configured"], "active": active,
+                    "model": llm["model"], "attempts": llm["attempts"],
+                    "successes": llm["successes"], "failures": llm["failures"],
+                    "rejections": llm["rejections"]}}
 
 
 class Handler(BaseHTTPRequestHandler):

@@ -1,12 +1,122 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from bot import _eligible_customer, contexts, handle_context, handle_tick, runtime
+from engine import gemini_provider, llm_dispatch, nim_provider
 from engine.composition import compose
+from engine.gemini_provider import config as gemini_config
+from engine.nim_polish import build_fact_pack, polish, validate
+
+
+class GeminiWordingTests(unittest.TestCase):
+    """The Gemini provider must be a real runtime path, exercised without a key.
+
+    The transport is patched, so these tests never touch the network.
+    """
+
+    CATEGORY = {"slug": "dentists", "name": "Dentists",
+                "voice": {"tone": "clinical", "vocab_taboo": ["cheap"]}}
+    MERCHANT = {
+        "id": "m1", "category_slug": "dentists",
+        "identity": {"name": "Dr. Meera's Dental Clinic", "owner_first_name": "Meera",
+                     "locality": "Koramangala", "languages": ["en"]},
+        "performance": {"views": 1200, "calls": 40, "delta_7d": {"views_pct": -0.2}},
+        "offers": [{"title": "Free scaling", "status": "active"}],
+    }
+    TRIGGER = {"id": "t1", "kind": "perf_dip", "urgency": 3,
+               "payload": {"deadline_iso": "2026-12-15"}}
+
+    def setUp(self):
+        gemini_provider.reset_stats()
+        self._env = patch.dict(os.environ, {
+            "LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-test",
+            "LLM_API_KEY": "TEST_KEY_NOT_REAL",
+            "GEMINI_BASE_URL": "https://example.invalid",
+        }, clear=False)
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def _action(self):
+        return compose(self.CATEGORY, self.MERCHANT, self.TRIGGER, None,
+                       now="2026-04-26T10:30:00Z")
+
+    def _polish(self, patched_return):
+        with patch.object(gemini_provider, "complete",
+                          return_value=patched_return) as mock:
+            action = polish(self._action(), self.CATEGORY, self.MERCHANT,
+                            self.TRIGGER, None)
+            return action, mock
+
+    def test_gemini_is_enabled_and_reads_configured_settings(self):
+        self.assertTrue(gemini_provider.is_enabled())
+        settings = gemini_config()
+        self.assertEqual(settings["provider"], "gemini")
+        self.assertEqual(settings["model"], "gemini-test")
+        self.assertEqual(settings["base_url"], "https://example.invalid")
+        self.assertEqual(llm_dispatch.active_name(), "gemini")
+
+    def test_dispatcher_routes_to_gemini(self):
+        self.assertIs(llm_dispatch.get_provider(), gemini_provider)
+
+    def test_gemini_rewording_reaches_the_body(self):
+        base = self._action()
+        rewritten = base["body"].replace("Want me to review",
+                                         "Would you like me to review")
+        self.assertNotEqual(rewritten, base["body"])
+        action, mock = self._polish(rewritten)
+        mock.assert_called_once()
+        self.assertEqual(action["body"], rewritten)
+
+    def test_gemini_failure_falls_back_to_deterministic(self):
+        base = self._action()
+        action, _ = self._polish(None)
+        self.assertEqual(action["body"], base["body"])
+        self.assertEqual(action["cta"], base["cta"])
+
+    def test_gemini_invented_fact_is_rejected(self):
+        draft = self._action()["body"]
+        action, _ = self._polish(draft[:-1] + " Save 50% off now?")
+        self.assertEqual(action["body"], draft)
+
+    def test_gemini_timeout_keeps_action_valid(self):
+        base = self._action()
+        with patch.object(gemini_provider, "complete",
+                          side_effect=TimeoutError("timed out")):
+            action = polish(base, self.CATEGORY, self.MERCHANT, self.TRIGGER, None)
+        self.assertEqual(action["body"], base["body"])
+        for field in ("body", "cta", "send_as", "template_name",
+                      "template_params", "suppression_key", "rationale"):
+            self.assertIn(field, action)
+
+    def test_unsupported_provider_is_fully_deterministic(self):
+        with patch.dict(os.environ, {"LLM_PROVIDER": "some-other-llm"}, clear=False):
+            self.assertIsNone(llm_dispatch.get_provider())
+            self.assertFalse(llm_dispatch.is_enabled())
+            base = self._action()
+            with patch.object(gemini_provider, "complete") as mock:
+                action = polish(base, self.CATEGORY, self.MERCHANT, self.TRIGGER, None)
+            self.assertEqual(action["body"], base["body"])
+            mock.assert_not_called()
+
+    def test_key_never_appears_in_prompt_or_reported_stats(self):
+        prompt = gemini_provider.build_prompt(
+            {"merchant_name": "Dr. Meera's Dental Clinic"}, "draft")
+        self.assertNotIn("TEST_KEY_NOT_REAL", prompt)
+        self.assertNotIn("TEST_KEY", str(gemini_provider.stats()))
+
+    def test_gemini_response_text_is_extracted(self):
+        payload = {"candidates": [{"content": {"parts": [
+            {"text": "Dr. Meera, your views are down 20% this week. "},
+            {"text": "Want me to review the next step?"}]}}]}
+        self.assertEqual(
+            gemini_provider._text_from_response(payload),
+            "Dr. Meera, your views are down 20% this week. Want me to review the next step?")
 from engine.context_store import ContextStore
 from engine.conversation import respond
 from engine.signals import consent_allows
@@ -444,5 +554,150 @@ class LiveServerTests(unittest.TestCase):
         self.assertTrue(any(w in lowered for w in ("proceeding", "draft", "here", "next step")))
 
 
+class NIMLayerTests(unittest.TestCase):
+    """A: disabled, B: mocked success, C: failure, D: bad facts, E: timeout.
+
+    Every test drives the real polish() entry point with a patched transport, so
+    none of them needs a network connection or an API key.
+    """
+
+    CATEGORY = {
+        "slug": "dentists", "name": "Dentists",
+        "voice": {"tone": "clinical", "vocab_taboo": ["cheap"],
+                  "vocab_preferred": ["clinical"]},
+    }
+    MERCHANT = {
+        "id": "m1", "category_slug": "dentists",
+        "identity": {"name": "Dr. Meera's Dental Clinic", "owner_first_name": "Meera",
+                     "locality": "Koramangala", "languages": ["en"]},
+        "performance": {"views": 1200, "calls": 40, "delta_7d": {"views_pct": -0.2}},
+        "offers": [{"title": "Free scaling", "status": "active"}],
+    }
+    TRIGGER = {"id": "t1", "kind": "perf_dip", "urgency": 3,
+               "payload": {"deadline_iso": "2026-12-15"}}
+
+    def setUp(self):
+        nim_provider.reset_stats()
+        self._env = patch.dict(os.environ, {
+            "LLM_PROVIDER": "nvidia", "LLM_MODEL": "nvidia/test-model",
+            "NVIDIA_API_KEY": "nvapi-TEST_KEY_NOT_REAL",
+        }, clear=False)
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def _action(self):
+        return compose(self.CATEGORY, self.MERCHANT, self.TRIGGER, None,
+                       now="2026-04-26T10:30:00Z")
+
+    def _polish_with(self, result):
+        with patch.object(nim_provider, "complete", return_value=result) as mock:
+            action = polish(self._action(), self.CATEGORY, self.MERCHANT,
+                            self.TRIGGER, None)
+            return action, mock
+
+    def test_a_disabled_provider_is_deterministic_and_makes_no_call(self):
+        base = self._action()
+        with patch.dict(os.environ, {"LLM_PROVIDER": ""}, clear=False):
+            with patch.object(nim_provider, "complete") as mock:
+                action = polish(base, self.CATEGORY, self.MERCHANT, self.TRIGGER, None)
+            self.assertEqual(action["body"], base["body"])
+            mock.assert_not_called()
+
+    def test_b_successful_nim_wording_reaches_the_body(self):
+        base = self._action()
+        draft = base["body"]
+        rewritten = draft.replace("Want me to review", "Would you like me to review")
+        self.assertNotEqual(rewritten, draft, "fixture must actually differ")
+        # The rewording must be a legitimate candidate, not merely different.
+        pack = build_fact_pack(base, self.CATEGORY, self.MERCHANT, self.TRIGGER, None)
+        accepted, reason = validate(rewritten, draft, base, pack)
+        self.assertTrue(accepted, f"fixture should be valid: {reason}")
+        action, mock = self._polish_with(rewritten)
+        mock.assert_called_once()
+        self.assertEqual(action["body"], rewritten)
+        # The transport is mocked, so the real success counter is not touched;
+        # what matters here is that the accepted wording reached the action.
+        self.assertEqual(nim_provider.STATS["rejections"], 0)
+
+    def test_c_request_failure_falls_back_to_deterministic_body(self):
+        base = self._action()
+        action, _ = self._polish_with(None)  # transport reported failure
+        self.assertEqual(action["body"], base["body"])
+        self.assertEqual(action["cta"], base["cta"])
+        self.assertEqual(action["template_name"], base["template_name"])
+
+    def test_d_invented_number_is_rejected(self):
+        draft = self._action()["body"]
+        action, _ = self._polish_with(draft[:-1] + " Save 40% off today?")
+        self.assertEqual(action["body"], draft, "invented discount must be rejected")
+        self.assertEqual(nim_provider.STATS["rejections"], 1)
+
+    def test_d_altered_identity_is_rejected(self):
+        draft = self._action()["body"]
+        altered = draft.replace("Dr. Meera", "Dr. Priya")
+        self.assertNotEqual(altered, draft)
+        action, _ = self._polish_with(altered)
+        self.assertEqual(action["body"], draft)
+
+    def test_d_dropped_url_is_rejected(self):
+        action_obj = self._action()
+        draft = action_obj["body"] + " See https://example.com/deal for details?"
+        accepted, reason = validate(draft.replace(" https://example.com/deal", ""),
+                                    draft, action_obj, {})
+        self.assertFalse(accepted)
+        self.assertIn("URL", reason)
+
+    def test_d_invented_url_is_rejected(self):
+        action_obj = self._action()
+        draft = action_obj["body"]
+        accepted, reason = validate(draft + " Visit https://spam.example now?",
+                                    draft, action_obj, {})
+        self.assertFalse(accepted)
+        self.assertIn("URL", reason)
+
+    def test_d_prohibited_content_is_rejected(self):
+        action_obj = self._action()
+        draft = action_obj["body"]
+        accepted, reason = validate(draft.replace("?", " — guaranteed results!?"),
+                                    draft, action_obj, {})
+        self.assertFalse(accepted)
+        self.assertIn("prohibited", reason)
+
+    def test_d_dropped_cta_is_rejected(self):
+        action_obj = self._action()
+        draft = action_obj["body"]
+        accepted, reason = validate(draft.replace("?", ""), draft, action_obj, {})
+        self.assertFalse(accepted)
+        self.assertIn("call to action", reason)
+
+    def test_e_timeout_falls_back_and_keeps_action_valid(self):
+        base = self._action()
+        with patch.object(nim_provider, "complete", side_effect=TimeoutError("timed out")):
+            action = polish(base, self.CATEGORY, self.MERCHANT, self.TRIGGER, None)
+        self.assertEqual(action["body"], base["body"])
+        for field in ("body", "cta", "send_as", "template_name",
+                      "template_params", "suppression_key", "rationale"):
+            self.assertIn(field, action)
+
+    def test_provider_disabled_when_key_missing(self):
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": ""}, clear=False):
+            self.assertFalse(nim_provider.is_enabled())
+
+    def test_key_never_appears_in_prompt_or_stats(self):
+        prompt = nim_provider.build_prompt(
+            {"merchant_name": "Dr. Meera's Dental Clinic"}, "draft")
+        self.assertNotIn("nvapi-TEST_KEY_NOT_REAL", prompt)
+        self.assertNotIn("nvapi", str(nim_provider.stats()))
+
+    def test_fact_pack_contains_only_approved_facts(self):
+        base = self._action()
+        pack = build_fact_pack(base, self.CATEGORY, self.MERCHANT, self.TRIGGER, None)
+        self.assertEqual(pack["merchant_name"], "Dr. Meera's Dental Clinic")
+        self.assertEqual(pack["deadline"], "2026-12-15")
+        self.assertEqual(pack["active_offer"], "Free scaling")
+        self.assertEqual(pack["approved_cta"], base["cta"])
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -18,29 +18,22 @@ services:
       - key: PYTHONHASHSEED
         value: "0"
 
+      # Production is deliberately deterministic. This is the measured winner:
+      # the wording layer is wired in and can be switched on, but no provider
+      # key is configured here, so composition never leaves the process.
+      #
+      # To turn on the optional LLM wording layer, set LLM_PROVIDER to
+      # "gemini" or "nvidia" and add the matching key env var. Selection,
+      # consent, suppression, facts, and CTA stay deterministic either way, and
+      # any provider failure falls back to the deterministic body.
       - key: LLM_PROVIDER
-        value: "nvidia"
-
-      - key: NIM_BASE_URL
-        value: "https://integrate.api.nvidia.com/v1"
-
-      - key: LLM_MODEL
-        value: "nvidia/nemotron-3-super-120b-a12b"
-
-      - key: LLM_FALLBACK_MODEL
-        value: "nvidia/nemotron-3-super-120b-a12b"
+        value: ""
 
       - key: LLM_TIMEOUT_SECONDS
-        value: "20"
+        value: "6"
 
       - key: LLM_FORCE_IPV4
         value: "1"
-
-      - key: BOT_MODEL
-        value: "nvidia/nemotron-3-super-120b-a12b"
-
-      - key: NVIDIA_API_KEY
-        sync: false
 
       - key: BOT_CONTACT_EMAIL
         sync: false

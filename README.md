@@ -1,799 +1,792 @@
-# VERA — Deterministic Merchant Engagement Engine
+﻿# VERA — Intelligent Merchant Engagement Engine
 
-> **A production-style, deterministic decision engine for merchant engagement.**
->
-> `compose(category, merchant, trigger, customer?)` transforms structured context into the **next best merchant message**, including its CTA, sender identity, suppression key, and decision rationale.
-
-### Live Deployment
-
-| Resource | Link |
-|---|---|
-| **Live API** | [vera-bot-ay9l.onrender.com](https://vera-bot-ay9l.onrender.com/?utm_source=chatgpt.com) |
-| **Health Check** | [GET /v1/healthz](https://vera-bot-ay9l.onrender.com/v1/healthz?utm_source=chatgpt.com) |
-| Metadata | `/v1/metadata` |
-| Context Ingestion | `POST /v1/context` |
-| Decision / Tick | `POST /v1/tick` |
-| Conversation Reply | `POST /v1/reply` |
-| State Reset | `POST /v1/teardown` |
-
-**Live verification:** the deployed service currently reports `status: ok`.
+> **Magicpin AI Challenge Submission**  
+> A deterministic, stateful merchant engagement engine with LLM-assisted message generation, trigger prioritization, contextual decision-making, safety validation, and suppression logic.
 
 ---
 
-# Why VERA
+## 🏆 Evaluation Results
 
-Merchant engagement is not simply a text-generation problem.
+### Official LLM Judge
 
-A useful engagement engine must answer:
+| Metric | Score |
+|---|---:|
+| **Overall** | **36 / 50** |
+| Specificity | 7 / 10 |
+| Category Fit | **7 / 10** |
+| Merchant Fit | 7 / 10 |
+| Decision Quality | **7 / 10** |
+| Engagement / CTA | 6 / 10 |
 
-1. **Should we send anything?**
-2. **What should we talk about?**
-3. **Which merchant-specific fact should anchor the message?**
-4. **What action should the merchant take?**
-5. **Who should the message appear to come from?**
-6. **Has this recipient already received this communication?**
-7. **Can the exact decision be reproduced later?**
+**Messages scored:** 14
 
-VERA separates these concerns into a deterministic decision pipeline.
+### Strongest evaluated messages
+
+| Scenario | Score |
+|---|---:|
+| Renewal | **46 / 50** |
+| Supply Alert | **45 / 50** |
+| Compliance | **43 / 50** |
+| Kids Yoga | **40 / 50** |
+
+No high-scoring trigger regressed during the final decision-engine improvements.
+
+### Engineering Validation
+
+| Check | Result |
+|---|---:|
+| Unit tests | **60 / 60 PASS** |
+| Grounding / safety cases | **11 / 11 PASS** |
+| Gemini runtime verification | **PASS** |
+| Provider failures in final runtime verification | **0** |
+| Successful provider attempts | **1 / 1** |
+
+---
+
+# 1. Problem
+
+Merchant engagement systems typically have access to large amounts of operational and behavioral context:
+
+- Merchant category
+- Merchant profile
+- Customer activity
+- Business performance
+- Reviews
+- Inventory / supply
+- Subscription status
+- Visibility changes
+- Demand trends
+- Previous engagement history
+
+The challenge is not simply generating text.
+
+The system must decide:
+
+> **What should be communicated, to whom, why now, and what should the merchant do next?**
+
+A naive LLM-only architecture can produce:
+
+- Generic recommendations
+- Irrelevant messages
+- Unsupported numbers
+- Repeated notifications
+- Poorly timed interventions
+- Category-inappropriate actions
+- Hallucinated discounts or metrics
+
+VERA therefore separates **decision-making from language generation**.
+
+---
+
+# 2. Solution
+
+VERA uses a **deterministic decision engine as the source of truth**, with an optional LLM layer used primarily for natural-language refinement.
 
 ```text
                     ┌─────────────────────┐
-                    │   Supplied Context  │
+                    │   Merchant Context  │
+                    │ Customer Context    │
+                    │ Trigger Context     │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Context Store       │
+                    │ Versioned State     │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Trigger Engine      │
+                    │ Priority / Freshness│
+                    │ Safety / Urgency    │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Decision Engine     │
                     │                     │
-                    │ Category            │
-                    │ Merchant            │
-                    │ Trigger             │
-                    │ Customer / Consent  │
+                    │ Trigger → Family    │
+                    │        → Fact       │
+                    │        → Why Now    │
+                    │        → Action     │
+                    │        → CTA        │
                     └──────────┬──────────┘
                                │
                                ▼
                     ┌─────────────────────┐
-                    │ Context Validation  │
-                    │ & Normalization     │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ Trigger Strategy    │
-                    │ Selection           │
-                    └──────────┬──────────┘
-                               │
-                 ┌─────────────┼─────────────┐
-                 ▼             ▼             ▼
-          Merchant Facts   Category Pack   Consent
-                 │             │             │
-                 └─────────────┼─────────────┘
-                               ▼
-                    ┌─────────────────────┐
-                    │ Evidence Selection  │
-                    │ & Fact Grounding    │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ CTA / Identity /    │
-                    │ Language Selection  │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ Suppression &       │
-                    │ Frequency Controls  │
+                    │ Consent + Targeting │
+                    │ Merchant/Customer   │
                     └──────────┬──────────┘
                                │
                                ▼
                     ┌─────────────────────┐
                     │ Deterministic       │
-                    │ Message Composition │
+                    │ Composition Layer   │
                     └──────────┬──────────┘
                                │
                                ▼
                     ┌─────────────────────┐
-                    │ Message + CTA +     │
-                    │ Identity + Rationale│
+                    │ Optional Gemini LLM │
+                    │ Natural Language    │
+                    │ Refinement          │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Validation Layer    │
+                    │                     │
+                    │ • Fact grounding    │
+                    │ • Number validation │
+                    │ • Merchant match    │
+                    │ • CTA preservation  │
+                    │ • Repetition check  │
+                    │ • Safety checks     │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Final Action        │
+                    │ Message + CTA       │
                     └─────────────────────┘
 ```
 
 ---
 
-# Core Design Principle
+# 3. Core Design Principle
 
-## No LLM in the decision path
+## Deterministic decisions, probabilistic language
 
-The production decision engine is **pure deterministic Python**.
+The LLM is **not responsible for deciding business facts**.
 
-There are:
+The deterministic engine decides:
 
-- no network calls during composition
-- no external model dependency
-- no randomness
-- no sampling
-- no generated facts
-- no hidden state in an external LLM
+```text
+WHAT happened
+      ↓
+WHY it matters
+      ↓
+WHAT the merchant should do
+      ↓
+WHAT CTA should be presented
+```
 
-Therefore:
+The LLM may then improve the wording while remaining constrained by the generated fact pack.
 
-> **The same context produces the same decision.**
+This provides a stronger separation between:
 
-This is particularly important for a judged environment where the evaluator may replay or inject contexts after submission.
+- **Business logic**
+- **Decision quality**
+- **Natural-language generation**
 
-The LLM is intentionally isolated from the production decision path and is used only for **offline evaluation/judging**.
-
----
-
-# Architecture
-
-VERA is organized around five decision layers.
-
-### 1. Context Layer
-
-The engine receives structured information about:
-
-- merchant
-- category
-- trigger
-- customer
-- consent
-- performance/contextual evidence
-
-The decision engine only uses facts available in the supplied context.
+and reduces the risk of LLM hallucination.
 
 ---
 
-### 2. Trigger Strategy Layer
+# 4. Decision Pipeline
 
-Each trigger maps to an engagement strategy.
+Every trigger passes through a structured decision pipeline.
+
+### Trigger
 
 Examples include:
 
-- performance opportunities
-- appointment/reminder flows
-- customer engagement
-- operational events
-- merchant growth opportunities
-- replenishment/refill scenarios
-- category-specific engagement
+- Subscription renewal
+- Inventory / supply alerts
+- Review milestones
+- Visibility changes
+- Customer demand
+- Dormancy
+- Performance changes
+- Compliance events
 
-The trigger strategy determines **what kind of action is appropriate**, while the context determines **what can truthfully be said**.
+### Trigger → Decision
 
----
-
-### 3. Evidence Layer
-
-VERA follows a strict evidence hierarchy:
+The decision engine converts a raw trigger into:
 
 ```text
-Trigger-specific facts
-        ↓
-Merchant performance snapshot
-        ↓
-Category-level framing
-        ↓
-Truthful generic message
+Trigger
+  ↓
+Trigger Family
+  ↓
+Grounded Fact
+  ↓
+Why Now
+  ↓
+Recommended Action
+  ↓
+CTA
 ```
-
-The engine never invents a number to make a message sound more persuasive.
-
-If a quantitative claim is unavailable, VERA uses a truthful unquantified formulation rather than fabricating a metric.
-
----
-
-### 4. Personalization Layer
-
-Category packs control:
-
-- language style
-- salutation
-- offer framing
-- CTA style
-- merchant terminology
-- category-specific vocabulary
-
-This allows the same decision framework to adapt its communication style to different merchant categories.
 
 For example:
 
 ```text
-Category Context
-       ↓
- ┌───────────────┐
- │ Category Pack │
- └───────┬───────┘
-         │
-         ├── Tone
-         ├── Vocabulary
-         ├── Salutation
-         ├── CTA
-         └── Offer framing
+Trigger:
+Subscription approaching renewal
+
+        ↓
+
+Family:
+Retention
+
+        ↓
+
+Fact:
+Subscription is nearing renewal
+
+        ↓
+
+Why Now:
+Renewal window is approaching
+
+        ↓
+
+Action:
+Review the current plan and renew
+
+        ↓
+
+CTA:
+Review renewal
 ```
 
-The important distinction is that **personalization changes presentation, not factual grounding**.
+This prevents the LLM from inventing the business recommendation.
 
 ---
 
-# Consent & Customer Safety
+# 5. Trigger Prioritization
 
-Customer-facing communication is explicitly consent-gated.
+When multiple events are available, VERA prioritizes them using deterministic ordering based on:
+
+1. **Safety**
+2. **Urgency**
+3. **Freshness**
+
+This avoids sending multiple competing messages for the same merchant in a single evaluation cycle.
+
+The system also applies:
+
+- Consent gating
+- Deduplication
+- Suppression
+- Repetition control
+- Merchant/customer targeting
+
+---
+
+# 6. Category-Aware Decisions
+
+The recommendation is adapted to the merchant's category.
+
+Supported category-aware decision paths include:
+
+- Restaurants
+- Gyms / fitness
+- Salons
+- Pharmacies
+- Dental / healthcare
+- Other supported merchant categories
+
+Instead of generating a generic:
+
+> "Improve your performance."
+
+the decision engine can produce category-relevant actions such as:
 
 ```text
-Customer context
-       │
-       ▼
-Is opt-in present?
-       │
-   ┌───┴───┐
-   │       │
-  YES      NO
-   │       │
-   ▼       ▼
-Check     Suppress
-scope     message
-   │
-   ▼
-Does scope cover
-trigger purpose?
-   │
- ┌─┴─┐
-YES  NO
- │    │
- ▼    ▼
-Send Suppress
+Restaurant
+→ respond to reviews / improve visibility / address demand
+
+Gym
+→ address declining engagement / promote relevant offering
+
+Salon
+→ address appointment or discovery signals
+
+Pharmacy
+→ respond to stock / demand signals
+
+Dental
+→ address booking / review / visibility signals
 ```
 
-A missing or insufficient consent scope is treated as **denial**, never as implicit permission.
-
-This makes consent part of the decision system rather than a post-processing check.
+The exact recommendation remains grounded in the available trigger context.
 
 ---
 
-# Suppression & Anti-Spam
+# 7. LLM Layer
 
-Suppression keys are scoped to the communication target.
-
-Conceptually:
+The current implementation supports Gemini as the language-generation layer.
 
 ```text
-merchant_id
-     +
-customer_id
-     +
-communication purpose
-     ↓
-suppression key
+Deterministic Draft
+        ↓
+Fact Pack
+        ↓
+Gemini
+        ↓
+Candidate Rewording
+        ↓
+Validation
+        ↓
+Accept / Reject
 ```
 
-This prevents a generic category-level suppression rule from unintentionally silencing unrelated merchants or customers.
+The LLM is therefore **optional from a correctness perspective**.
 
-VERA also enforces:
+If LLM generation fails, times out, violates grounding rules, or produces an unsafe modification, the system can fall back to the deterministic message.
 
-> **At most one message per merchant per tick.**
-
-This creates a deterministic frequency-control boundary and prevents multiple simultaneous triggers from producing a message burst.
+This ensures that an external model failure does not break the core engagement engine.
 
 ---
 
-# Deterministic Decision Contract
+# 8. Grounding & Anti-Hallucination
 
-Every decision is represented with the information required to understand and reproduce it.
+The validation layer protects factual integrity.
 
-Conceptually:
+The system checks generated messages against the available source facts.
 
-```json
-{
-  "message": "...",
-  "cta": "...",
-  "send_as": "...",
-  "suppression_key": "...",
-  "rationale": "..."
-}
-```
+Examples of protected information include:
 
-The rationale makes the output auditable rather than treating the message as an opaque generated artifact.
+- Percentages
+- Prices
+- Counts
+- Performance metrics
+- Pack quantities
+- Merchant identity
+- Trigger facts
 
----
+An LLM cannot introduce an unsupported discount simply because it sounds persuasive.
 
-# Graceful Handling of Unknown Context
-
-The engine is deliberately conservative.
-
-Unknown:
-
-- triggers
-- categories
-- incomplete payloads
-- unavailable metrics
-
-do not cause the system to invent an answer.
-
-Instead, VERA falls back to a **truthful generic strategy**.
-
-This gives the system a useful property:
+For example:
 
 ```text
-More context
-     ↓
-More specific message
+Source:
+Pack contains 40 units
 
-Less context
-     ↓
-Less specific message
+Allowed:
+"Your 40-unit pack..."
 
-Never:
-Less context → fabricated information
+Rejected:
+"Get 40% off..."
 ```
+
+The validation layer distinguishes between:
+
+- A real source number
+- A percentage
+- A price
+- An unsupported numerical claim
+
+This is particularly important for merchant-facing communications.
 
 ---
 
-# API
+# 9. Suppression & Deduplication
 
-## `GET /v1/healthz`
+VERA prevents unnecessary repeated communication through deterministic controls.
 
-Service health endpoint.
+The engine considers:
 
-```text
-GET /v1/healthz
-```
+- Previous messages
+- Trigger identity
+- Message similarity
+- Merchant state
+- Consent
+- Current decision priority
 
-Live deployment:
+The objective is not to maximize message volume.
 
-[Check VERA health](https://vera-bot-ay9l.onrender.com/v1/healthz?utm_source=chatgpt.com)
+The objective is to send:
 
----
-
-## `GET /v1/metadata`
-
-Returns service metadata and supported interface information.
-
-```text
-GET /v1/metadata
-```
+> **One relevant message when there is a meaningful reason to act.**
 
 ---
 
-## `POST /v1/context`
+# 10. API
 
-Loads the context required for a decision.
+The application exposes a lightweight HTTP interface.
 
-```text
+### Health Check
+
+```http
+GET /healthz
+```
+
+Used by deployment and judge health checks.
+
+---
+
+### Context Update
+
+```http
 POST /v1/context
 ```
 
-Contexts can include:
-
-```text
-category
-merchant
-customer
-trigger
-```
+Updates the versioned merchant/customer context.
 
 ---
 
-## `POST /v1/tick`
+### Tick
 
-Runs the deterministic decision engine.
-
-```text
+```http
 POST /v1/tick
 ```
 
-The tick evaluates available contexts and produces the next eligible communication.
+Runs the decision pipeline against the current context and available triggers.
 
----
-
-## `POST /v1/reply`
-
-Handles conversational continuation.
-
-```text
-POST /v1/reply
-```
-
-This allows the system to maintain the engagement flow after the initial decision.
-
----
-
-## `POST /v1/teardown`
-
-Resets the current in-memory state.
-
-```text
-POST /v1/teardown
-```
-
-Useful for isolated evaluation and deterministic replay.
-
----
-
-# Evaluation
-
-VERA was designed to be evaluated against the challenge's core requirements rather than only against text quality.
-
-The evaluation framework checks dimensions such as:
-
-- factual specificity
-- category fit
-- merchant relevance
-- decision quality
-- engagement / CTA quality
-- evidence usage
-- payload grounding
-- suppression behavior
-- communication style
-- trigger handling
-
-### Judge Evaluation
-
-A clean `phase2_short` evaluation achieved:
-
-> **44 / 50 — 88%**
-
-with the production decision engine operating deterministically throughout the evaluated scenarios.
-
-This result validates the end-to-end integration between:
+Conceptually:
 
 ```text
 Context
   ↓
-Trigger
+Trigger prioritization
   ↓
-Decision Engine
+Decision
   ↓
-Evidence Selection
-  ↓
-Message Composition
-  ↓
-Judge Evaluation
-```
-
----
-
-# Reproducibility
-
-The same context can be replayed against the engine without relying on model sampling.
-
-```text
-Context A
-   ↓
-Decision A
-
-Replay Context A
-   ↓
-Decision A
-```
-
-This makes debugging and evaluation substantially easier because a decision is a function of its supplied state rather than an LLM sampling outcome.
-
----
-
-# Performance-Oriented Design
-
-The production path intentionally avoids an LLM dependency.
-
-This provides three architectural advantages:
-
-### Deterministic latency
-
-Composition does not require a remote model call.
-
-### Reproducibility
-
-The same input state produces the same output.
-
-### Factual control
-
-Every claim originates from supplied context or a predefined category strategy.
-
-The architecture therefore treats an LLM as an **evaluation/composition aid outside the scored decision path**, rather than as the source of truth.
-
----
-
-# Technology
-
-VERA intentionally keeps the runtime lightweight.
-
-```text
-Runtime
-   Python
-
-API
-   FastAPI / HTTP interface
-
-Decision Engine
-   Deterministic Python
-
-State
-   In-memory contextual state
-
-Deployment
-   Container / Render compatible
-
-Production LLM dependency
-   None
-```
-
-There is no model download or heavyweight inference runtime required by the deployed decision engine.
-
----
-
-# Deployment
-
-The application can run with:
-
-```bash
-python bot.py --port 8131
-```
-
-The service honors:
-
-```text
-$PORT
-```
-
-and binds to:
-
-```text
-0.0.0.0
-```
-
-### Docker
-
-```bash
-docker build -t vera .
-docker run -p 8080:8080 vera
-```
-
-### Render
-
-A `render.yaml` deployment configuration is included with the health check configured against:
-
-```text
-/v1/healthz
-```
-
-The currently deployed instance is available at:
-
-[VERA Live API](https://vera-bot-ay9l.onrender.com/?utm_source=chatgpt.com)
-
----
-
-# Local Evaluation
-
-The repository includes a deterministic test and evaluation workflow.
-
-### Unit & integration tests
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-### Decision-engine checks
-
-```bash
-python run_judge_checks.py --port 8131
-```
-
-The checks cover scenarios including:
-
-- warm-up
-- repeated conversation handling
-- intent routing
-- hostile/incomplete inputs
-- HTTP integration
-
-### Submission generation
-
-```bash
-python generate_submission.py
-```
-
-This regenerates the challenge submission dataset.
-
-### Judge evaluation
-
-```bash
-python run_judge_scored.py phase2_short
-```
-
-### Judge output parsing
-
-```bash
-python parse_judge_output.py --hints
-```
-
-### Local proxy analysis
-
-```bash
-python proxy_score.py
-```
-
-The proxy evaluator is intended for **developmental comparison between revisions**, while the challenge judge remains the authoritative evaluation mechanism.
-
----
-
-# Engineering Decisions
-
-| Decision | Rationale |
-|---|---|
-| Deterministic composition | Reproducible decisions |
-| Evidence-first messaging | Prevents unsupported claims |
-| Trigger-specific strategies | Aligns communication with merchant context |
-| Category packs | Enables domain-aware communication |
-| Explicit consent gating | Prevents unauthorized customer messaging |
-| Merchant/customer scoped suppression | Prevents unrelated suppression collisions |
-| One message per merchant/tick | Controls communication frequency |
-| Graceful unknown-context fallback | Prevents fabricated information |
-| LLM outside production decision path | Removes model/network variability |
-| Auditable rationale | Makes decisions inspectable |
-
----
-
-# Key Engineering Insight
-
-The central design choice in VERA is to treat **decision-making and language generation as separate concerns**.
-
-```text
-                 DECISION
-                    │
-        ┌───────────┴───────────┐
-        │                       │
-   What to send            Should we send?
-        │                       │
-        └───────────┬───────────┘
-                    │
-                    ▼
-              Evidence
-                    │
-                    ▼
-             CTA / Identity
-                    │
-                    ▼
-              Composition
-                    │
-                    ▼
-              Final Message
-```
-
-The system therefore does not ask:
-
-> "What would an LLM like to say?"
-
-It asks:
-
-> **"Given the available evidence, trigger, merchant, customer state and communication constraints, what is the next valid action?"**
-
-Only after that decision is established does the system construct the communication.
-
----
-
-# Production Considerations
-
-The current implementation intentionally uses in-memory state to keep the challenge deployment lightweight and deterministic.
-
-For a production multi-instance deployment, the natural evolution would be:
-
-```text
-Current
-
-FastAPI
-   │
-   └── In-memory state
-
-
-Production Scale
-
-FastAPI instances
-   │
-   ├───────────────┐
-   │               │
-   ▼               ▼
-Shared State     Shared
-Store            Suppression
-                 Store
-```
-
-The decision-engine interface itself remains independent of that storage layer.
-
----
-
-# What Makes VERA Different
-
-VERA is not designed as a generic chatbot.
-
-It is a **decision engine with a communication interface**.
-
-Its core properties are:
-
-**Evidence-grounded**  
-Every quantitative or merchant-specific claim must originate from supplied context.
-
-**Deterministic**  
-Identical context produces identical decisions.
-
-**Consent-aware**  
-Customer communication is explicitly gated by recorded consent scope.
-
-**Merchant-aware**  
-The merchant is part of the decision, not merely a placeholder in generated text.
-
-**Category-aware**  
-Communication adapts to the merchant's business category.
-
-**Suppression-aware**  
-Repeated communication is controlled at the appropriate scope.
-
-**Auditable**  
-The system returns a rationale alongside the communication decision.
-
-**Deployable**  
-The production decision path has no dependency on an external LLM.
-
----
-
-# Quick Judge Verification
-
-The fastest way to verify the live system is:
-
-### 1. Open the live service
-
-[Open VERA Live API](https://vera-bot-ay9l.onrender.com/?utm_source=chatgpt.com)
-
-### 2. Verify health
-
-[Open `/v1/healthz`](https://vera-bot-ay9l.onrender.com/v1/healthz?utm_source=chatgpt.com)
-
-### 3. Inspect metadata
-
-```text
-GET /v1/metadata
-```
-
-### 4. Exercise the decision API
-
-```text
-POST /v1/context
-        ↓
-POST /v1/tick
-        ↓
-decision + message + CTA + rationale
-```
-
-### 5. Re-run the same context
-
-The deterministic engine should reproduce the same decision.
-
----
-
-# Summary
-
-VERA combines:
-
-```text
-Structured Context
-       +
-Trigger Intelligence
-       +
-Evidence Grounding
-       +
-Category Adaptation
-       +
 Consent
-       +
-Suppression
-       +
-Deterministic Composition
-       ↓
-Next Best Merchant Engagement
+  ↓
+Composition
+  ↓
+LLM refinement
+  ↓
+Validation
+  ↓
+Action
 ```
-
-The result is a lightweight, reproducible merchant-engagement engine designed around **grounded decisions rather than unconstrained text generation**.
 
 ---
 
-## Live
+# 11. Stateful Context
 
-**VERA:** [https://vera-bot-ay9l.onrender.com/](https://vera-bot-ay9l.onrender.com/?utm_source=chatgpt.com)
+Context is versioned rather than treated as a single static prompt.
 
-**Health:** [https://vera-bot-ay9l.onrender.com/v1/healthz](https://vera-bot-ay9l.onrender.com/v1/healthz?utm_source=chatgpt.com)
+This enables the system to reason about changing merchant state across evaluation ticks.
 
-**Verified evaluation:** **44 / 50 (88%)** on the `phase2_short` judge evaluation.
+```text
+Context v1
+   ↓
+Context v2
+   ↓
+Context v3
+   ↓
+...
+```
+
+This makes it possible to incorporate:
+
+- Newly observed events
+- Previous engagement
+- Trigger freshness
+- Merchant state changes
+- Suppression history
+
+---
+
+# 12. Reliability Architecture
+
+The system is intentionally designed so that the LLM is **not a single point of failure**.
+
+```text
+                  ┌──────────────┐
+                  │ Deterministic│
+                  │ Decision Core │
+                  └───────┬──────┘
+                          │
+                          ▼
+                  ┌──────────────┐
+                  │ Draft Message│
+                  └───────┬──────┘
+                          │
+                    LLM available?
+                     /          \
+                   YES           NO
+                   /              \
+                  ▼                ▼
+             Gemini            Deterministic
+             Rewrite             Fallback
+                  │
+                  ▼
+             Validation
+              /       \
+           PASS       FAIL
+            │           │
+            ▼           ▼
+         LLM text    Original
+                    deterministic
+                       draft
+```
+
+This allows the system to remain operational even when:
+
+- The LLM times out
+- The provider returns an error
+- A response fails validation
+- Rate limits are encountered
+
+---
+
+# 13. Evaluation
+
+The solution was evaluated using the Magicpin LLM Judge.
+
+### Final Evaluation
+
+**36 / 50**
+
+| Dimension | Result |
+|---|---:|
+| Specificity | 7 / 10 |
+| Category Fit | 7 / 10 |
+| Merchant Fit | 7 / 10 |
+| Trigger Relevance / Decision Quality | 7 / 10 |
+| Engagement / CTA | 6 / 10 |
+
+### Notable Scenarios
+
+**46 / 50 — Renewal**
+
+The system correctly connected the renewal trigger to a timely retention action.
+
+**45 / 50 — Supply Alert**
+
+The system generated a highly relevant operational intervention while preserving the underlying facts.
+
+**43 / 50 — Compliance**
+
+The system prioritized a high-importance trigger and produced a clear action.
+
+**40 / 50 — Kids Yoga**
+
+The category-aware decision path produced a relevant recommendation.
+
+---
+
+# 14. Engineering Validation
+
+The final implementation was validated using automated tests.
+
+```text
+60 / 60 unit tests                 PASS
+11 / 11 safety / grounding cases   PASS
+Gemini runtime verification        PASS
+Provider failures                  0
+Provider successes                 1 / 1
+```
+
+The test suite covers:
+
+- Trigger prioritization
+- Context handling
+- Decision generation
+- Category-specific behavior
+- Consent
+- Suppression
+- Deduplication
+- Numeric grounding
+- LLM fallback
+- Response validation
+
+---
+
+# 15. Technology Stack
+
+### Backend
+
+- Python
+- Standard-library `ThreadingHTTPServer`
+- JSON HTTP APIs
+
+### Decision Engine
+
+- Deterministic Python logic
+- Versioned context
+- Trigger prioritization
+- Category-aware decisions
+- Suppression / deduplication
+
+### LLM
+
+- Google Gemini
+- Configurable model through environment variables
+
+### Testing
+
+- Python `unittest`
+- End-to-end verification
+- LLM runtime verification
+- Grounding / hallucination checks
+
+---
+
+# 16. Project Structure
+
+```text
+magicpin-ai-challenge/
+│
+├── bot.py
+│
+├── engine/
+│   ├── composition.py
+│   ├── decisions.py
+│   ├── gemini_provider.py
+│   ├── nim_provider.py
+│   └── nim_polish.py
+│
+├── tests/
+│   └── test_engine.py
+│
+├── judge_simulator.py
+├── verify_bot_e2e.py
+├── verify_gemini_runtime.py
+├── submission.jsonl
+│
+├── render.yaml
+├── .env.example
+└── README.md
+```
+
+---
+
+# 17. Configuration
+
+Create a `.env` file locally.
+
+```env
+LLM_PROVIDER=gemini
+LLM_MODEL=gemini-3.5-flash-lite
+LLM_API_KEY=<YOUR_API_KEY>
+
+BOT_URL=http://127.0.0.1:8131
+TEST_SCENARIO=full_evaluation
+```
+
+**Never commit `.env` or API keys to the repository.**
+
+Use `.env.example` for public configuration documentation.
+
+---
+
+# 18. Local Run
+
+Install the required dependencies if applicable, then start the bot:
+
+```bash
+python bot.py
+```
+
+The server runs on:
+
+```text
+http://127.0.0.1:8131
+```
+
+Verify health:
+
+```bash
+curl http://127.0.0.1:8131/healthz
+```
+
+Then run the evaluation:
+
+```bash
+python judge_simulator.py
+```
+
+---
+
+# 19. Deployment
+
+The repository includes a `render.yaml` deployment configuration.
+
+The production deployment should provide the following environment variables:
+
+```text
+LLM_PROVIDER
+LLM_MODEL
+LLM_API_KEY
+```
+
+The API key should be configured through the deployment platform's secret/environment-variable system rather than committed to source control.
+
+---
+
+# 20. Design Trade-offs
+
+### Why not use an LLM for everything?
+
+An LLM-only architecture makes it difficult to guarantee:
+
+- Consistent trigger prioritization
+- Factual grounding
+- Repetition control
+- Consent enforcement
+- Deterministic fallbacks
+
+VERA therefore uses the LLM where it provides the most value:
+
+> **Natural language generation and refinement.**
+
+The business decision remains deterministic.
+
+---
+
+### Why deterministic fallback?
+
+The system should still produce a valid action when:
+
+```text
+LLM unavailable
+LLM timeout
+LLM rate limited
+Invalid LLM response
+Unsupported factual claim
+```
+
+The deterministic draft becomes the fallback.
+
+---
+
+# 21. Key Takeaway
+
+VERA is designed around a simple principle:
+
+> **Decide deterministically. Communicate naturally. Validate everything.**
+
+The architecture combines:
+
+```text
+State
++
+Triggers
++
+Deterministic Decisions
++
+Category Intelligence
++
+LLM Language Generation
++
+Grounding
++
+Suppression
++
+Validation
+```
+
+to produce merchant-facing actions that are timely, relevant, actionable, and resilient to LLM failures.
+
+---
+
+## Final Status
+
+**Submission-ready**
+
+```text
+Official Judge Score       36 / 50
+Unit Tests                 60 / 60
+Safety / Grounding        11 / 11
+Gemini Runtime             PASS
+Deployment Configuration   Ready
+```
+
+**Built for the Magicpin VERA AI Challenge.**

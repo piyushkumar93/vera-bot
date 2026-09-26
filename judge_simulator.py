@@ -673,25 +673,38 @@ Score each dimension 0-10 with clear reasoning. Be STRICT."""
             pass
 
     def _parse_response(self, response: str, action: Dict) -> ScoreResult:
-        """Parse LLM JSON response."""
-        match = re.search(r'\{[\s\S]*\}', response)
-        if not match:
+        """Parse LLM JSON response robustly."""
+        raw = response.strip()
+        data = None
+        start = raw.find("{")
+        if start != -1:
+            try:
+                data, _ = json.JSONDecoder().raw_decode(raw[start:])
+            except Exception:
+                pass
+        if data is None:
+            match = re.search(r"\{[\s\S]*\}", response)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except Exception:
+                    pass
+        if not isinstance(data, dict):
             return self._fallback_score(action)
 
         try:
-            data = json.loads(match.group())
             result = ScoreResult(
                 specificity=min(10, max(0, int(data.get("specificity", 5)))),
-                specificity_reason=data.get("specificity_reason", ""),
+                specificity_reason=str(data.get("specificity_reason", "")),
                 category_fit=min(10, max(0, int(data.get("category_fit", 5)))),
-                category_fit_reason=data.get("category_fit_reason", ""),
+                category_fit_reason=str(data.get("category_fit_reason", "")),
                 merchant_fit=min(10, max(0, int(data.get("merchant_fit", 5)))),
-                merchant_fit_reason=data.get("merchant_fit_reason", ""),
+                merchant_fit_reason=str(data.get("merchant_fit_reason", "")),
                 decision_quality=min(10, max(0, int(data.get("decision_quality", data.get("trigger_relevance", 5))))),
-                decision_quality_reason=data.get("decision_quality_reason", data.get("trigger_relevance_reason", "")),
+                decision_quality_reason=str(data.get("decision_quality_reason", data.get("trigger_relevance_reason", ""))),
                 engagement_compulsion=min(10, max(0, int(data.get("engagement_compulsion", 5)))),
-                engagement_reason=data.get("engagement_reason", ""),
-                hint=data.get("hint", "")
+                engagement_reason=str(data.get("engagement_reason", "")),
+                hint=str(data.get("hint", ""))
             )
             return result
         except Exception as e:
