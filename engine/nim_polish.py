@@ -24,6 +24,12 @@ from .signals import items, mapping, percent, text
 # deterministic path already enforces.
 MAX_BODY_CHARS = 1500
 
+# How many times the wording layer may sample before settling for the
+# deterministic body. Two attempts is deliberate: the first sample is usually
+# accepted or trivially correctable, and the second clears most residual
+# rejections without doubling worst-case latency past the tick budget.
+MAX_POLISH_ATTEMPTS = 2
+
 # A candidate must stay within this band of the draft's length. Generous enough
 # for real rewording, tight enough to catch rambling or truncation.
 MAX_LENGTH_RATIO = 1.6
@@ -32,6 +38,10 @@ MIN_LENGTH_RATIO = 0.35
 NUMBER_RE = re.compile(r"\d[\d,]*\.?\d*")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.I)
 CURRENCY_RE = re.compile(r"[₹$€£]\s?\d[\d,]*\.?\d*")
+# A percentage is a commercial or comparative claim, so it is tracked separately
+# from bare numbers: "40" may be a call count the fact pack supplied, but
+# "40% off" is a discount the draft never authorised.
+PERCENT_RE = re.compile(r"\d[\d,]*\.?\d*\s*%")
 DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\s+"
                      r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", re.I)
 
@@ -178,12 +188,20 @@ def validate(candidate: str, draft: str, action: dict[str, Any],
 
     draft_lower, body_lower = draft.lower(), body.lower()
 
-    # No new numbers: every number in the rewrite must already exist in the
-    # draft. This single guard covers invented discounts, changed prices, and
-    # altered dates at once.
-    extra = _numbers(body) - _numbers(draft)
+    # No invented numbers. A number is allowed if it appears in the draft or
+    # anywhere in the fact pack the model was shown. The pack is exactly the
+    # approved, deterministic facts -- performance, deadline, offer, identity --
+    # so surfacing one of them (a real views count, a real due date) is
+    # rewording, not invention.
+    #
+    # A percentage is still judged separately and by *form* (below), so widening
+    # the number set here does not let a fabricated discount through: "40%" is
+    # refused even though the pack may contain "calls=40".
+    approved = " ".join(str(v) for v in fact_pack.values() if v)
+    allowed_numbers = _numbers(draft) | _numbers(approved)
+    extra = _numbers(body) - allowed_numbers
     if extra:
-        return False, f"introduced numbers not in draft: {sorted(extra)}"
+        return False, f"introduced numbers not in approved facts: {sorted(extra)}"
 
     # Required numbers must survive the rewrite.
     missing = _numbers(draft) - _numbers(body)
@@ -195,6 +213,26 @@ def validate(candidate: str, draft: str, action: dict[str, Any],
         for token in pattern.findall(draft):
             if token.lower() not in body_lower:
                 return False, f"altered {label}: {token}"
+
+    # A price is a commercial claim, so it may only be repeated, never invented.
+    # It may come from the draft or from the approved offer in the fact pack. A
+    # bare number check is not enough on its own -- a currency figure that
+    # coincides with a count would slip past it -- which is why this form-based
+    # check exists separately from the number check above.
+    allowed_currency = {t.lower() for t in CURRENCY_RE.findall(draft)}
+    allowed_currency |= {t.lower() for t in CURRENCY_RE.findall(approved)}
+    for token in CURRENCY_RE.findall(body):
+        if token.lower() not in allowed_currency:
+            return False, f"introduced price not in approved facts: {token}"
+
+    # A percentage may also come from the fact pack, but only where the pack
+    # states it as a percentage. That keeps a real "views_pct_change=4%" usable
+    # while still refusing a "40% off" that borrows "calls=40".
+    allowed_percents = {t.lower() for t in PERCENT_RE.findall(draft)}
+    allowed_percents |= {t.lower() for t in PERCENT_RE.findall(approved)}
+    for token in PERCENT_RE.findall(body):
+        if token.lower() not in allowed_percents:
+            return False, f"introduced discount/percentage not in approved facts: {token}"
 
     # A URL in the draft is mandatory in the rewrite; a URL absent from the
     # draft must not be conjured.
@@ -244,11 +282,18 @@ def validate(candidate: str, draft: str, action: dict[str, Any],
 
 def polish(action: dict[str, Any], category: dict[str, Any], merchant: dict[str, Any],
            trigger: dict[str, Any], customer: dict[str, Any] | None) -> dict[str, Any]:
-    """Return the action with, at most, an NIM-rewritten body.
+    """Return the action with, at most, an LLM-rewritten body.
 
     The action is never mutated in place. Every field other than `body` is
     carried through untouched, and `body` is only replaced when the candidate
     passes validation. Any failure returns the deterministic action unchanged.
+
+    A rejected candidate is retried once. Rejection is usually a specific,
+    correctable fault in one reply -- a number the model surfaced that the draft
+    happened not to mention, or a wording echo -- and a second sample very often
+    clears it. This keeps the model as the primary source of wording instead of
+    silently degrading a share of messages to the deterministic draft, while the
+    validator remains the only thing that decides acceptance.
     """
     from . import llm_dispatch
 
@@ -259,29 +304,36 @@ def polish(action: dict[str, Any], category: dict[str, Any], merchant: dict[str,
         return action
 
     fact_pack = build_fact_pack(action, category, merchant, trigger, customer)
-    try:
-        candidate = llm_dispatch.complete(fact_pack, draft)
-    except Exception as exc:  # noqa: BLE001 - wording must never break a tick
-        # Defence in depth: a transport that raises (rather than returning None)
-        # must still degrade to the deterministic body rather than fail /v1/tick.
-        provider = llm_dispatch.get_provider()
-        if provider is not None:
-            provider.STATS["failures"] += 1
-        print(f"[llm] transport raised {type(exc).__name__} -> deterministic fallback",
-              flush=True)
-        return action
-    if candidate is None:
-        return action
+    provider = llm_dispatch.get_provider()
 
-    accepted, reason = validate(candidate, draft, action, fact_pack)
-    if not accepted:
-        provider = llm_dispatch.get_provider()
+    for attempt in range(1, MAX_POLISH_ATTEMPTS + 1):
+        try:
+            candidate = llm_dispatch.complete(fact_pack, draft)
+        except Exception as exc:  # noqa: BLE001 - wording must never break a tick
+            # Defence in depth: a transport that raises (rather than returning
+            # None) must still degrade to the deterministic body rather than
+            # fail /v1/tick.
+            if provider is not None:
+                provider.STATS["failures"] += 1
+            print(f"[llm] transport raised {type(exc).__name__} "
+                  f"-> deterministic fallback", flush=True)
+            return action
+        if candidate is None:
+            # The provider already exhausted its own retry/failover budget.
+            return action
+
+        accepted, reason = validate(candidate, draft, action, fact_pack)
+        if accepted:
+            updated = dict(action)
+            updated["body"] = _strip_wrapping(candidate)[:MAX_BODY_CHARS]
+            return updated
+
         if provider is not None:
             provider.STATS["rejections"] += 1
-        print(f"[llm] rejected candidate ({reason}) -> deterministic fallback",
+        print(f"[llm] rejected candidate ({reason})"
+              f"{' -> retrying' if attempt < MAX_POLISH_ATTEMPTS else ' -> deterministic fallback'}",
               flush=True)
-        return action
+        if attempt >= MAX_POLISH_ATTEMPTS:
+            return action
 
-    updated = dict(action)
-    updated["body"] = _strip_wrapping(candidate)[:MAX_BODY_CHARS]
-    return updated
+    return action

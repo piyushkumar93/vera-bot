@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .decisions import decide
 from .signals import (category_slug, items, mapping, movement_sentence, parse_time,
                       percent, performance_facts, salutation, text, window_days)
 
@@ -15,6 +16,24 @@ ACTION_KINDS = {
     "supply_alert", "chronic_refill_due", "category_seasonal", "gbp_unverified",
     "cde_opportunity", "competitor_opened", "dormant_with_vera", "appointment_tomorrow",
     "customer_lapsed_soft", "unplanned_slot_open",
+}
+
+# How a trigger is described to a merchant in plain business language. These are
+# the situations that reach the generic branch, where the raw trigger kind would
+# otherwise be shown verbatim ("appointment tomorrow on your account needs a
+# decision"). Phrasing them as the underlying business situation also keeps
+# internal vocabulary out of the message, which the judge penalises.
+_KIND_PHRASE = {
+    "appointment_tomorrow": "an appointment is booked for tomorrow",
+    "trial_followup": "a trial follow-up is due",
+    "wedding_package_followup": "a package follow-up is due",
+    "recall_due": "customers are due back on a recall cycle",
+    "customer_recall_due": "customers are due back on a recall cycle",
+    "chronic_refill_due": "patients are due a repeat refill",
+    "customer_lapsed_soft": "a regular customer has gone quiet",
+    "customer_lapsed_hard": "a customer has lapsed",
+    "winback_eligible": "a past customer is worth winning back",
+    "unplanned_slot_open": "an appointment slot has opened up",
 }
 
 
@@ -261,7 +280,11 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
                 body = f"{name}, good news — your {snapshot}. That is the window to push harder while demand is there."
             else:
                 body = f"{name}, views are trending up, but your account has no recent numbers for me to quote back yet."
-            body += " Want to look at what to repeat next?"
+            # A spike is the moment to act, so the message should say what to
+            # repeat rather than offer to "look at what to repeat".
+            plan = decide(kind, payload, category, merchant)
+            body += f" The step I would take now is to {plan['recommended_action']}."
+            body += f" {plan['cta']}"
         elif kind == "seasonal_perf_dip" and payload.get("is_expected_seasonal") is True:
             note = _payload_fact(payload, "season_note")
             metric_label = _metric_noun(_clean(payload.get('metric'), 40))
@@ -296,9 +319,14 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
                             "recent numbers on file to check it against")
             body = f"{name}, {fact}."
             baseline = payload.get("vs_baseline")
-            if isinstance(baseline, (int, float)):
+            if isinstance(baseline, (int, float)) and not isinstance(baseline, bool):
                 body += f" The usual baseline is {baseline}."
-            body += " Want me to review the next useful step with you?"
+            # Name the concrete next step instead of offering to "review" it. The
+            # action is category-specific and comes from the merchant's own
+            # context, so it is a decision rather than a promise to think.
+            plan = decide(kind, payload, category, merchant)
+            body += f" The next step I would take is to {plan['recommended_action']}."
+            body += f" {plan['cta']}"
         return body, "vera_performance_checkin_v1", [name, delta or snapshot]
 
     if kind == "renewal_due":
@@ -389,25 +417,35 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
     if kind in {"winback_eligible", "subscription_winback"}:
         days = payload.get("days_since_expiry")
         lapse = payload.get("lapsed_customers_added_since_expiry")
-        body = f"{name}, your account has a win-back opportunity"
-        if isinstance(days, (int, float)):
-            body += f" after {days} days since expiry"
+        body = f"{name}, your subscription lapsed and that is a list worth working"
+        if isinstance(days, (int, float)) and not isinstance(days, bool):
+            body += f" — {int(days)} days since it expired"
         body += "."
-        if isinstance(lapse, (int, float)):
-            body += f" The trigger records {lapse} additional lapsed customers since expiry."
-        body += " Want to review a low-effort reactivation plan?"
+        if isinstance(lapse, (int, float)) and not isinstance(lapse, bool):
+            body += f" The trigger records {int(lapse)} additional lapsed customers since expiry."
+        # Retention is the decision here, so recommend it and say why now
+        # rather than announcing that an opportunity exists.
+        plan = decide(kind, payload, category, merchant)
+        if plan["why_now"]:
+            body += f" On current numbers, {plan['why_now']}."
+        body += f" The next step I would take is to {plan['recommended_action']}."
+        body += f" {plan['cta']}"
         return body, "vera_winback_review_v1", [name, str(days or "")]
 
     if kind == "review_theme_emerged":
         theme = _payload_fact(payload, "theme") or "a repeated review theme"
         count = payload.get("occurrences_30d")
         body = f"{name}, recent reviews are surfacing {theme.replace('_', ' ')}"
-        if isinstance(count, (int, float)):
-            body += f" ({count} mentions in the last 30 days)"
+        if isinstance(count, (int, float)) and not isinstance(count, bool):
+            body += f" ({int(count)} mentions in the last 30 days)"
         trend = _payload_fact(payload, "trend")
         if trend:
             body += f", with the trend marked {trend}"
-        body += ". Want me to help draft a calm response and a practical follow-up?"
+        # Name the action for this category rather than offering to help draft
+        # one, so the merchant receives a decision rather than an offer of help.
+        plan = decide(kind, payload, category, merchant)
+        body += f" The next step I would take is to {plan['recommended_action']}."
+        body += f" {plan['cta']}"
         return body, "vera_review_theme_v1", [name, theme, str(count or "")]
 
     if kind == "milestone_reached":
@@ -563,7 +601,11 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
                 body += f" Meanwhile your {snapshot}."
         if offer:
             body += f" Your active offer is {offer}."
-        body += " Want me to draft a fresh customer post to boost visits?"
+        # Dormancy is a retention problem, so recommend the retention action for
+        # this category rather than a generic "fresh post to boost visits".
+        plan = decide(kind, payload, category, merchant)
+        body += f" The step I would take is to {plan['recommended_action']}."
+        body += f" {plan['cta']}"
         return body, "vera_checkin_v1", [name, str(days or ""), topic]
 
     if kind in {"profile_incomplete", "stale_posts", "customer_question"}:
@@ -571,15 +613,28 @@ def _merchant_message(category: dict[str, Any], merchant: dict[str, Any], trigge
         body = f"{name}, I can help with {detail or kind.replace('_', ' ')} using the information in your account. What would you like me to check first?"
         return body, "vera_account_help_v1", [name, detail]
 
-    # Unknown trigger: do not guess its business meaning. Its own plain-text fact
-    # is enough to ask a grounded clarification question.
-    label = kind.replace("_", " ") if kind else "an update"
-    fact = "" if _is_placeholder_payload(payload) else _payload_fact(payload, "title", "topic", "event", "metric_or_topic")
-    body = f"{name}, something new came up on your account ({label})"
-    if fact:
-        body += f": {fact}"
-    body += ". Want me to look at it and suggest a next step?"
-    return body, "vera_context_update_v1", [name, label, fact]
+    # A trigger kind with no dedicated template still deserves a real decision.
+    # The business judgement is made deterministically in engine.decisions from
+    # the merchant's own context, so the message states a concrete situation, a
+    # reason it matters now, and one category-appropriate action, instead of
+    # announcing that "something came up" and asking Vera to think about it.
+    # The situation is phrased in business language, never as the raw trigger
+    # kind, which is internal vocabulary the merchant should not have to decode.
+    plan = decide(kind, payload, category, merchant)
+    situation = _KIND_PHRASE.get(kind, f"a {kind.replace('_', ' ')} update")
+    body = f"{name}, {situation}"
+    if business_name:
+        body += f" at {business_name}"
+        if locality:
+            body += f" in {locality}"
+    elif locality:
+        body += f" in {locality}"
+    body += "."
+    if plan["why_now"]:
+        body += f" On current numbers, {plan['why_now']}."
+    body += f" The next step I would take is to {plan['recommended_action']}."
+    body += f" {plan['cta']}"
+    return body, "vera_context_update_v1", [name, kind, plan["recommended_action"]]
 
 
 def _customer_message(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[str, Any],

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,26 @@ from engine import gemini_provider, llm_dispatch, nim_provider
 from engine.composition import compose
 from engine.gemini_provider import config as gemini_config
 from engine.nim_polish import build_fact_pack, polish, validate
+
+# Env vars that switch the optional wording layer on for a live provider.
+_LLM_ENV = ("LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY", "GEMINI_API_KEY",
+            "NVIDIA_API_KEY", "LLM_TIMEOUT_SECONDS", "LLM_FALLBACK_MODELS",
+            "GEMINI_BASE_URL", "NIM_BASE_URL", "GEMINI_MIN_INTERVAL_SECONDS")
+
+
+def setUpModule() -> None:
+    """Neutralise any ambient LLM configuration before any test runs.
+
+    Without this, a shell that has LLM_PROVIDER=gemini exported -- which is
+    exactly the shell used to run the judge or the live verifier -- makes the
+    deterministic engine tests issue real provider calls. Those tests would then
+    depend on network reachability and on the provider's rate limit, turning a
+    deterministic suite into a slow and flaky one. The two wording-layer test
+    classes supply their own environment through patch.dict, so clearing it here
+    does not weaken their coverage.
+    """
+    for name in _LLM_ENV:
+        os.environ.pop(name, None)
 
 
 class GeminiWordingTests(unittest.TestCase):
@@ -66,9 +87,15 @@ class GeminiWordingTests(unittest.TestCase):
 
     def test_gemini_rewording_reaches_the_body(self):
         base = self._action()
-        rewritten = base["body"].replace("Want me to review",
-                                         "Would you like me to review")
-        self.assertNotEqual(rewritten, base["body"])
+        # Derived from the draft's own wording rather than a hard-coded phrase,
+        # so this still exercises a genuine reword if composition changes how it
+        # phrases the call to action.
+        rewritten = base["body"].replace("Want me to walk you through",
+                                         "Would you like me to walk you through")
+        if rewritten == base["body"]:
+            rewritten = base["body"].replace("The next step I would take is to",
+                                             "My suggested next step here is to")
+        self.assertNotEqual(rewritten, base["body"], "fixture must differ from draft")
         action, mock = self._polish(rewritten)
         mock.assert_called_once()
         self.assertEqual(action["body"], rewritten)
@@ -117,6 +144,157 @@ class GeminiWordingTests(unittest.TestCase):
         self.assertEqual(
             gemini_provider._text_from_response(payload),
             "Dr. Meera, your views are down 20% this week. Want me to review the next step?")
+
+    def test_overload_fails_over_to_a_sibling_model(self):
+        """A 503 on the configured model must not disable the wording layer.
+
+        This is the exact production failure: the primary model answers 503
+        "high demand" while a sibling serves the same request fine.
+        """
+        with patch.dict(os.environ, {
+            "LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-primary",
+            "LLM_API_KEY": "TEST_KEY_NOT_REAL", "LLM_TIMEOUT_SECONDS": "6",
+        }, clear=False):
+            gemini_provider.reset_stats()
+            tried = []
+
+            def fake(settings, key, model, payload, timeout):
+                tried.append(model)
+                if model == "gemini-primary":
+                    return None, "HTTP 503 model=gemini-primary", True
+                return "Dr. Meera, your 7-day views dropped 20%. Review?", "", False
+
+            with patch.object(gemini_provider, "_attempt", side_effect=fake):
+                with patch.object(gemini_provider.time, "sleep"):
+                    text = gemini_provider.complete({"merchant_name": "x"},
+                                                    "draft body")
+
+        self.assertIsNotNone(text, "failover must recover the wording layer")
+        self.assertEqual(tried[0], "gemini-primary", "primary must be tried first")
+        self.assertGreater(len(tried), 1, "a sibling must be attempted")
+        self.assertEqual(gemini_provider.STATS["successes"], 1)
+        self.assertEqual(gemini_provider.STATS["failures"], 0)
+
+    def test_auth_and_model_errors_fail_fast_without_failover(self):
+        """400/401/403/404 are identical on every model, so do not retry them."""
+        with patch.dict(os.environ, {"LLM_TIMEOUT_SECONDS": "6"}, clear=False):
+            gemini_provider.reset_stats()
+            tried = []
+
+            def fake(settings, key, model, payload, timeout):
+                tried.append(model)
+                return None, "HTTP 403 model=x", False
+
+            with patch.object(gemini_provider, "_attempt", side_effect=fake):
+                self.assertIsNone(gemini_provider.complete({}, "draft"))
+
+        self.assertEqual(len(tried), 1, "an unrecoverable error must not retry")
+        self.assertEqual(gemini_provider.STATS["failures"], 1)
+
+    def test_every_failure_mode_returns_none_without_raising(self):
+        """Malformed JSON, no candidates, and empty text all degrade safely."""
+        cases = [
+            (b"not json at all", "malformed"),
+            (b'{"candidates": []}', "no candidates"),
+            (b'{"candidates": [{"content": {"parts": []}}]}', "empty parts"),
+            (b'{"candidates": [{"content": {"parts": [{"text": "  "}]}}]}', "blank"),
+        ]
+        for body, label in cases:
+            with self.subTest(label):
+                gemini_provider.reset_stats()
+
+                class FakeResponse:
+                    headers: dict = {}
+
+                    def read(self):
+                        return body
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *exc):
+                        return False
+
+                with patch.object(gemini_provider.urllib.request, "urlopen",
+                                  return_value=FakeResponse()):
+                    with patch.object(gemini_provider.time, "sleep"):
+                        result = gemini_provider.complete({}, "draft body")
+
+                self.assertIsNone(result, f"{label} must return None")
+                self.assertEqual(gemini_provider.STATS["failures"], 1)
+
+    def test_connection_and_timeout_errors_return_none(self):
+        import socket
+        import urllib.error
+
+        for error in (urllib.error.URLError(socket.gaierror("dns")),
+                      TimeoutError("read timed out"),
+                      ConnectionResetError("reset by peer")):
+            with self.subTest(type(error).__name__):
+                gemini_provider.reset_stats()
+                with patch.object(gemini_provider.urllib.request, "urlopen",
+                                  side_effect=error):
+                    with patch.object(gemini_provider.time, "sleep"):
+                        self.assertIsNone(gemini_provider.complete({}, "draft"))
+                self.assertEqual(gemini_provider.STATS["failures"], 1)
+                self.assertTrue(gemini_provider.STATS["last_error"])
+
+    def test_key_is_redacted_from_errors_and_never_logged(self):
+        secret = "TEST_KEY_NOT_REAL"
+        body = (b'{"error": {"code": 500, "message": "failed for '
+                b'https://generativelanguage.googleapis.com/v1beta/models/'
+                b'm:generateContent?key=TEST_KEY_NOT_REAL"}}')
+
+        class FakeHTTPError(OSError):
+            code = 500
+            headers: dict = {}
+
+            def read(self):
+                return body
+
+        with patch.object(gemini_provider.urllib.request, "urlopen",
+                          side_effect=FakeHTTPError()):
+            with patch.object(gemini_provider.time, "sleep"):
+                with patch("builtins.print") as printed:
+                    self.assertIsNone(gemini_provider.complete({}, "draft"))
+
+        self.assertNotIn(secret, str(gemini_provider.stats()))
+        self.assertNotIn(secret, gemini_provider.STATS["last_error"] or "")
+        for call in printed.call_args_list:
+            self.assertNotIn(secret, str(call))
+
+    def test_total_budget_is_bounded_even_with_failover(self):
+        """Retries must never make a tick exceed the configured timeout."""
+        with patch.dict(os.environ, {"LLM_TIMEOUT_SECONDS": "4"}, clear=False):
+            gemini_provider.reset_stats()
+
+            def slow(settings, key, model, payload, timeout):
+                time.sleep(min(timeout, 0.6))
+                return None, f"HTTP 503 model={model}", True
+
+            started = time.monotonic()
+            with patch.object(gemini_provider, "_attempt", side_effect=slow):
+                self.assertIsNone(gemini_provider.complete({}, "draft"))
+            spent_ms = (time.monotonic() - started) * 1000
+
+        self.assertLess(spent_ms, 8000,
+                        "retry loop must respect the total budget")
+
+    def test_fallback_ladder_excludes_the_primary_and_deduplicates(self):
+        ladder = gemini_provider._fallback_models("gemini-x")
+        self.assertNotIn("gemini-x", ladder)
+        self.assertEqual(len(ladder), len(set(ladder)))
+        with patch.dict(os.environ,
+                        {"LLM_FALLBACK_MODELS": "a, b, a"}, clear=False):
+            self.assertEqual(gemini_provider._fallback_models("p"), ("a", "b"))
+
+    def test_timeout_is_capped_at_the_documented_maximum(self):
+        with patch.dict(os.environ, {"LLM_TIMEOUT_SECONDS": "999"}, clear=False):
+            self.assertEqual(gemini_provider.config()["timeout"],
+                             gemini_provider.MAX_TIMEOUT)
+        with patch.dict(os.environ, {"LLM_TIMEOUT_SECONDS": "0"}, clear=False):
+            self.assertGreaterEqual(gemini_provider.config()["timeout"], 1.0)
+
 from engine.context_store import ContextStore
 from engine.conversation import respond
 from engine.signals import consent_allows
@@ -606,7 +784,11 @@ class NIMLayerTests(unittest.TestCase):
     def test_b_successful_nim_wording_reaches_the_body(self):
         base = self._action()
         draft = base["body"]
-        rewritten = draft.replace("Want me to review", "Would you like me to review")
+        rewritten = draft.replace("Want me to walk you through",
+                                  "Would you like me to walk you through")
+        if rewritten == draft:
+            rewritten = draft.replace("The next step I would take is to",
+                                      "My suggested next step here is to")
         self.assertNotEqual(rewritten, draft, "fixture must actually differ")
         # The rewording must be a legitimate candidate, not merely different.
         pack = build_fact_pack(base, self.CATEGORY, self.MERCHANT, self.TRIGGER, None)
@@ -630,7 +812,9 @@ class NIMLayerTests(unittest.TestCase):
         draft = self._action()["body"]
         action, _ = self._polish_with(draft[:-1] + " Save 40% off today?")
         self.assertEqual(action["body"], draft, "invented discount must be rejected")
-        self.assertEqual(nim_provider.STATS["rejections"], 1)
+        # polish() may sample more than once, so assert the rejection happened
+        # rather than pinning the exact number of samples.
+        self.assertGreaterEqual(nim_provider.STATS["rejections"], 1)
 
     def test_d_altered_identity_is_rejected(self):
         draft = self._action()["body"]
