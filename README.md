@@ -5,6 +5,50 @@
 
 ---
 
+## 🚀 Verified Results
+
+| Result | Status |
+|---|---:|
+| Official LLM Judge | **36 / 50** |
+| Best evaluated scenario — Subscription Renewal | **46 / 50** |
+| Best evaluated scenario — Supply Alert | **45 / 50** |
+| Best evaluated scenario — Regulatory / Compliance | **43 / 50** |
+| Best evaluated scenario — Kids Yoga | **40 / 50** |
+| Unit tests | **60 / 60 PASS** |
+| Safety / grounding cases | **11 / 11 PASS** |
+| Gemini runtime verification | **PASS** |
+| Live Render deployment | **Online** |
+| Live `GET /v1/healthz` | **200 OK** |
+| Live `GET /v1/metadata` | **200 OK** |
+| Live `POST /v1/reply` | **200 OK** |
+
+---
+
+## 🔗 Submission & Repository
+
+| | |
+|---|---|
+| Live deployment | https://vera-bot-jtwh.onrender.com |
+| GitHub repository | https://github.com/piyushkumar93/vera-bot |
+
+**Verified API endpoints**
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/v1/context` | Versioned context update |
+| `POST` | `/v1/tick` | Decision tick |
+| `POST` | `/v1/reply` | Conversation reply routing |
+| `GET` | `/v1/healthz` | Health / readiness probe |
+| `GET` | `/v1/metadata` | Engine and LLM status |
+
+**Sample live-evaluation scores.** The deployed bot has been reached by the
+judge simulator. Individual live-evaluated messages scored **41 / 50** for a
+regulatory / compliance scenario and **41 / 50** for a subscription-renewal
+scenario. These are **sample live-evaluation scores for individual messages**,
+not an aggregate. The recorded aggregate benchmark remains **36 / 50**.
+
+---
+
 ## 🏆 Evaluation Results
 
 ### Official LLM Judge
@@ -158,6 +202,25 @@ VERA uses a **deterministic decision engine as the source of truth**, with an op
 ## Deterministic decisions, probabilistic language
 
 The LLM is **not responsible for deciding business facts**.
+
+The deterministic layer remains **authoritative** for every one of the following, and no LLM output can override it:
+
+- Trigger selection
+- Priority
+- Merchant / customer targeting
+- Consent
+- Suppression
+- Deduplication
+- Safety
+- Facts
+- Numbers
+- Prices
+- Dates
+- URLs
+- CTA policy
+- Context versioning
+- State transitions
+
 
 The deterministic engine decides:
 
@@ -410,7 +473,7 @@ The application exposes a lightweight HTTP interface.
 ### Health Check
 
 ```http
-GET /healthz
+GET /v1/healthz
 ```
 
 Used by deployment and judge health checks.
@@ -440,17 +503,25 @@ Conceptually:
 ```text
 Context
   ↓
-Trigger prioritization
+Versioned Context Store
   ↓
-Decision
+Trigger Detection
   ↓
-Consent
+Priority / Eligibility
   ↓
-Composition
+Merchant + Customer Targeting
   ↓
-LLM refinement
+Consent Gate
   ↓
-Validation
+Deterministic Composition
+  ↓
+Suppression + Deduplication
+  ↓
+Fact Pack
+  ↓
+Optional LLM Wording
+  ↓
+Validation / Grounding
   ↓
 Action
 ```
@@ -697,9 +768,28 @@ python judge_simulator.py
 
 # 19. Deployment
 
+The current production deployment is available at:
+
+**https://vera-bot-jtwh.onrender.com**
+
+The root URL is an API service entry point; the challenge harness should use the
+`/v1/*` endpoints rather than expecting a web UI.
+
+**Production verification**
+
+```bash
+curl -i https://vera-bot-jtwh.onrender.com/v1/healthz
+curl -i https://vera-bot-jtwh.onrender.com/v1/metadata
+```
+
+Both endpoints return `200 OK` on the deployed service. The deployed metadata
+reports Gemini as configured with `gemini-3.5-flash-lite`. The LLM layer remains
+optional from a correctness perspective, because the deterministic engine is
+authoritative and can provide the fallback response.
+
 The repository includes a `render.yaml` deployment configuration.
 
-The production deployment should provide the following environment variables:
+The production deployment provides the following environment variables:
 
 ```text
 LLM_PROVIDER
@@ -783,10 +873,15 @@ to produce merchant-facing actions that are timely, relevant, actionable, and re
 
 ```text
 Official Judge Score       36 / 50
-Unit Tests                 60 / 60
-Safety / Grounding        11 / 11
+Best Scenario              46 / 50  -- Subscription Renewal
+Unit Tests                 60 / 60 PASS
+Safety / Grounding         11 / 11 PASS
 Gemini Runtime             PASS
-Deployment Configuration   Ready
+Live Deployment            ONLINE
+Health / Metadata / Reply  200 OK
 ```
+
+Live bot: https://vera-bot-jtwh.onrender.com
+Repository: https://github.com/piyushkumar93/vera-bot
 
 **Built for the Magicpin VERA AI Challenge.**
