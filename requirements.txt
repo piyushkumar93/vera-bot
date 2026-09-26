@@ -1,0 +1,2 @@
+# The VERA bot is standard library only, so there is nothing to install.
+# This file exists so hosts that run `pip install -r requirements.txt` succeed.

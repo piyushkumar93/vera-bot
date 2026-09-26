@@ -1,0 +1,17 @@
+# Secrets must never reach version control.
+.env
+.env.*
+!.env.example
+
+# Judge runs and scratch output (may embed API responses).
+judge_output.txt
+judge_raw.log
+judge_raw*.log
+nvidia_models.txt
+nvidia_quick.txt
+nvidia_bench.txt
+*.log
+
+__pycache__/
+*.py[cod]
+.pytest_cache/

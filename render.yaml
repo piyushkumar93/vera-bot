@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: vera-bot
+    runtime: python
+    plan: free
+    region: singapore
+    # Standard library only; no build step beyond a no-op install.
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /v1/healthz
+    autoDeploy: false
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # PYTHONHASHSEED is pinned so any incidental set/dict iteration is
+      # reproducible across restarts, keeping responses deterministic.
+      - key: PYTHONHASHSEED
+        value: "0"

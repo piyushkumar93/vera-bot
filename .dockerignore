@@ -1,0 +1,22 @@
+# The service is standard library only, so the image needs no third-party
+# packages. Judge tooling and local secrets stay out of the runtime image.
+.git
+.gitignore
+.env
+.env.*
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Judge harness and scratch output are not needed to serve the bot.
+judge_simulator.py
+run_judge_*.py
+probe_*.py
+bench_*.py
+parse_judge_output.py
+proxy_score.py
+judge_output.txt
+judge_raw.log
+nvidia_*.txt
+*.log
