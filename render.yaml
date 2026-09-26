@@ -9,7 +9,7 @@ services:
     startCommand: python bot.py
 
     healthCheckPath: /v1/healthz
-    autoDeploy: false
+    autoDeploy: true
 
     envVars:
       - key: PYTHONUNBUFFERED
@@ -18,12 +18,17 @@ services:
       - key: PYTHONHASHSEED
         value: "0"
 
-      # Gemini LLM wording layer
+      # Gemini LLM wording layer. Selection, consent, suppression, fact
+      # selection and CTA stay deterministic; only message phrasing is
+      # delegated, and any provider failure falls back to the deterministic
+      # body. Set LLM_PROVIDER to "" to run fully deterministic.
       - key: LLM_PROVIDER
         value: "gemini"
 
+      # gemini-3.5-flash answers HTTP 503 "high demand" for this project;
+      # gemini-3.5-flash-lite serves reliably on the same key.
       - key: LLM_MODEL
-        value: "gemini-3.5-flash"
+        value: "gemini-3.5-flash-lite"
 
       - key: LLM_TIMEOUT_SECONDS
         value: "6"
@@ -34,5 +39,6 @@ services:
       - key: BOT_CONTACT_EMAIL
         sync: false
 
+      # Secret: set the real key in Render's environment UI, never in this file.
       - key: LLM_API_KEY
         sync: false
